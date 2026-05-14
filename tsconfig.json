@@ -2,9 +2,23 @@
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
-    "moduleResolution": "bundler",
+    "moduleResolution": "node",
     "strict": true,
-    "noEmit": true
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "rootDir": ".",
+    "baseUrl": ".",
+    "paths": {
+      "@utils/*": [
+        "extensions/utils/*"
+      ]
+    }
   },
-  "include": ["./**/*.ts"]
+  "include": [
+    "extensions/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    ".pi"
+  ]
 }
