@@ -560,6 +560,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (params.tasks && params.tasks.length > 0) {
+				recordStat("parallel", params.tasks[0].agent, ctx);
 				if (params.tasks.length > MAX_PARALLEL_TASKS)
 					return {
 						content: [
@@ -1000,5 +1001,10 @@ export default function (pi: ExtensionAPI) {
 		return { promptPaths: [promptsDir] };
 	});
 
-	pi.registerCommand("subagent-stats", { description: "Show subagent stats", handler: async (_, ctx) => ctx.ui.notify(stats.total + " runs") });
+	pi.registerCommand("subagent-stats", { description: "Show subagent stats", handler: async (_, ctx) => {
+				const lines = [`Total: ${stats.total} runs`];
+				for (const [mode, count] of Object.entries(stats.modes)) lines.push(`${mode}: ${count}`);
+				for (const [agent, count] of stats.agents) lines.push(`  ${agent}: ${count}`);
+				ctx.ui.notify(lines.join("\n"));
+			}});
 }

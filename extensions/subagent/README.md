@@ -25,12 +25,10 @@ ln -s ../../extensions/subagent .pi/extensions/subagent
 Or install globally:
 
 ```bash
-mkdir -p ~/.pi/agent/extensions/subagent
-ln -s /path/to/pi-extensions/extensions/subagent/index.ts ~/.pi/agent/extensions/subagent/index.ts
-ln -s /path/to/pi-extensions/extensions/subagent/agents.ts ~/.pi/agent/extensions/subagent/agents.ts
+ln -s /path/to/pi-extensions/extensions/subagent ~/.pi/agent/extensions/subagent
 ```
 
-No additional setup is needed — bundled agents and workflow prompts are available automatically.
+This symlinks the entire directory, so bundled agents and prompts are automatically available.
 
 ## Bundled Agents
 
