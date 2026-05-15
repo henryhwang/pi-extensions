@@ -61,7 +61,7 @@ Shows all configured keys (masked) and current priority order.
 |-----------|------|---------|-------------|
 | `query` | string | (required) | Search query |
 | `max_results` | number | 5 | Max results (1-10) |
-| `search_depth` | "basic" / "advanced" | "advanced" | Tavily only. Advanced returns full content + AI summary. |
+| `search_depth` | "basic" / "advanced" | "basic" | Tavily only. Advanced returns full content + AI summary. |
 | `include_domains` | string[] | — | Limit results to these domains |
 | `exclude_domains` | string[] | — | Exclude domains. Only supported by Exa; ignored by others. |
 
