@@ -56,6 +56,7 @@ const MAX_RESULTS = 10;
 const DEFAULT_PRIORITY: ProviderId[] = ["tavily", "exa", "serper"];
 
 type ProviderId = "tavily" | "exa" | "serper";
+const VALID_PROVIDERS: ProviderId[] = ["tavily", "exa", "serper"];
 
 // ── Search service config ──────────────────────────────────────
 
@@ -82,35 +83,80 @@ function getPriority(): ProviderId[] {
 
 // ── Search implementations ─────────────────────────────────────
 
+interface SearchOpts {
+  maxResults?: number;
+  signal?: AbortSignal;
+
+  // Tavily specific
+  searchDepth?: "basic" | "advanced";
+
+  // domain filtering (supported differently per provider)
+  includeDomains?: string[];
+  excludeDomains?: string[];
+}
+
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs: number = 15000
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort(
+      new DOMException(`Request timed out after ${timeoutMs}ms`, "TimeoutError")
+    )
+  }, timeoutMs);
+
+  try {
+    const fetchSignal = options.signal
+      ? AbortSignal.any([options.signal, controller.signal])
+      : controller.signal;
+
+    return await fetch(url, {
+      ...options,
+      signal: fetchSignal,
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 async function searchTavily(
   query: string,
-  maxResults: number,
-  searchDepth: "basic" | "advanced",
-  includeDomains?: string[],
+  options: SearchOpts = {}
 ): Promise<SearchOutput> {
   const apiKey = getKey("tavily");
   if (!apiKey) throw new Error("Tavily not configured. Set TAVILY_API_KEY or /web-search-config");
 
+  const searchDepth = options.searchDepth ?? "basic";
   const body: Record<string, unknown> = {
     query,
-    max_results: Math.min(maxResults, MAX_RESULTS),
+    max_results: Math.min(options.maxResults ?? MAX_RESULTS, MAX_RESULTS),
     search_depth: searchDepth,
     include_answer: searchDepth === "advanced",
   };
-  if (includeDomains?.length) body.include_domains = includeDomains;
+  if (options.includeDomains?.length) body.include_domains = options.includeDomains;
 
-  const res = await fetch(TAVILY_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+  const res = await fetchWithTimeout(
+    TAVILY_URL,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: options.signal,
     },
-    body: JSON.stringify(body),
-  });
+    20000
+  );
 
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`Tavily HTTP ${res.status}: ${errText}`);
+    const preview = errText
+      .slice(0, 200)
+      .replace(/\b[A-Za-z0-9_\-]{20,}\b/g, "[REDACTED]");
+    throw new Error(`Tavily HTTP ${res.status}: ${preview}`);
   }
 
   const data = await res.json();
@@ -129,37 +175,39 @@ async function searchTavily(
 
 async function searchExa(
   query: string,
-  maxResults: number,
-  includeDomains?: string[],
-  excludeDomains?: string[],
+  options: SearchOpts = {}
 ): Promise<SearchOutput> {
   const apiKey = getKey("exa");
   if (!apiKey) throw new Error("Exa not configured. Set EXA_API_KEY or /web-search-config");
 
   const body: Record<string, unknown> = {
     query,
-    numResults: Math.min(maxResults, MAX_RESULTS),
+    numResults: Math.min(options.maxResults ?? MAX_RESULTS, MAX_RESULTS),
     type: "auto",
     contents: {
       text: true,       // full page text (first 10 free)
       highlights: true, // key sentence excerpts
     },
   };
-  if (includeDomains?.length) body.includeDomains = includeDomains;
-  if (excludeDomains?.length) body.excludeDomains = excludeDomains;
+  if (options.includeDomains?.length) body.includeDomains = options.includeDomains;
+  if (options.excludeDomains?.length) body.excludeDomains = options.excludeDomains;
 
-  const res = await fetch(EXA_URL, {
+  const res = await fetchWithTimeout(EXA_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "x-api-key": apiKey,
     },
     body: JSON.stringify(body),
-  });
+    signal: options.signal
+  }, 20000);
 
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`Exa HTTP ${res.status}: ${errText}`);
+    const preview = errText
+      .slice(0, 200)
+      .replace(/\b[A-Za-z0-9_\-]{20,}\b/g, "[REDACTED]");
+    throw new Error(`Exa HTTP ${res.status}: ${preview}`);
   }
 
   const data = await res.json();
@@ -182,23 +230,27 @@ async function searchExa(
 
 async function searchSerper(
   query: string,
-  maxResults: number,
+  options: SearchOpts = {}
 ): Promise<SearchOutput> {
   const apiKey = getKey("serper");
   if (!apiKey) throw new Error("Serper not configured. Set SERPER_API_KEY or /web-search-config");
 
-  const res = await fetch(SERPER_URL, {
+  const res = await fetchWithTimeout(SERPER_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "X-API-KEY": apiKey,
     },
-    body: JSON.stringify({ q: query, num: Math.min(maxResults, MAX_RESULTS) }),
-  });
+    body: JSON.stringify({ q: query, num: Math.min(options.maxResults ?? MAX_RESULTS, MAX_RESULTS) }),
+    signal: options.signal
+  }, 20000);
 
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`Serper HTTP ${res.status}: ${errText}`);
+    const preview = errText
+      .slice(0, 200)
+      .replace(/\b[A-Za-z0-9_\-]{20,}\b/g, "[REDACTED]");
+    throw new Error(`Serper HTTP ${res.status}: ${preview}`);
   }
 
   const data = await res.json();
@@ -232,23 +284,17 @@ async function searchSerper(
 
 // ── Multi-provider search with fallback ────────────────────────
 
-const SEARCH_FN: Record<ProviderId, (query: string, maxResults: number, opts: SearchOpts) => Promise<SearchOutput>> = {
-  tavily: (q, n, o) => searchTavily(q, n, o.searchDepth ?? "advanced", o.includeDomains),
-  exa:    (q, n, o) => searchExa(q, n, o.includeDomains, o.excludeDomains),
-  serper: (q, n, _o) => searchSerper(q, n),
+const SEARCH_FN: Record<ProviderId, (query: string, opts: SearchOpts) => Promise<SearchOutput>> = {
+  tavily: searchTavily,
+  exa: searchExa,
+  serper: searchSerper,
 };
-
-interface SearchOpts {
-  searchDepth?: "basic" | "advanced";
-  includeDomains?: string[];
-  excludeDomains?: string[];
-}
 
 async function searchWithFallback(
   query: string,
-  maxResults: number,
-  opts: SearchOpts,
+  opts: SearchOpts = {}
 ): Promise<{ output: SearchOutput | null; lastError: string | null }> {
+  const maxResults = opts.maxResults ?? 5;
   const priority = getPriority();
   let lastError: string | null = null;
 
@@ -256,11 +302,11 @@ async function searchWithFallback(
     if (!getKey(provider)) continue; // skip unconfigured providers
 
     try {
-      const output = await SEARCH_FN[provider](query, maxResults, opts);
+      const output = await SEARCH_FN[provider](query, { ...opts, maxResults });
       return { output, lastError: null };
-    } catch (err: any) {
-      lastError = `${provider}: ${err.message}`;
-      // Fall through to next provider
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      lastError = `${provider}: ${msg}`;
     }
   }
 
@@ -271,7 +317,7 @@ async function searchWithFallback(
 
 const SOURCE_LABEL: Record<ProviderId, string> = {
   tavily: "Tavily (keyword + AI)",
-  exa:    "Exa (semantic/neural)",
+  exa: "Exa (semantic/neural)",
   serper: "Serper (Google SERP)",
 };
 
@@ -292,9 +338,12 @@ function formatOutput(output: SearchOutput): string {
     const scoreStr = r.score != null ? ` [relevance: ${r.score.toFixed(2)}]` : "";
     const dateStr = r.publishedDate ? ` [${r.publishedDate}]` : "";
     const authorStr = r.author ? ` by ${r.author}` : "";
+    const snippet = r.snippet.length > 400
+      ? r.snippet.slice(0, 400) + "..."
+      : r.snippet;
     lines.push(`${i + 1}. ${r.title}${scoreStr}${dateStr}${authorStr}`);
     lines.push(`   ${r.url}`);
-    lines.push(`   ${r.snippet}`);
+    lines.push(`   ${snippet}`);
     if (i < output.results.length - 1) lines.push("");
   }
 
@@ -320,7 +369,7 @@ const SearchParams = Type.Object({
     ] as const, {
       description:
         "Search depth. 'basic' is fast (snippets only). 'advanced' fetches full page content and returns an AI summary. Tavily only; Exa and Serper always return full snippets.",
-      default: "advanced",
+      default: "basic",
     }),
   ),
   include_domains: Type.Optional(
@@ -339,29 +388,39 @@ const SearchParams = Type.Object({
 
 // ── Extension ──────────────────────────────────────────────────
 
-export default function (pi: ExtensionAPI) {
+/**
+ * The Web Search extension.
+ * Registers the `web_search` tool and the `/web-search-config` command.
+ */
+export default function webSearchExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "web_search",
     label: "Web Search",
     description: [
-      "Search the web for coding-related information: docs, GitHub issues,",
-      "StackOverflow answers, blog posts, and more.",
-      "Uses Tavily (keyword+AI) → Exa (semantic) → Serper (Google SERP) with automatic fallback.",
-    ].join(" "),
+      "Search the web using multiple high-quality providers (Tavily → Exa → Serper) with automatic fallback.",
+      "",
+      "Best for:",
+      "- Latest documentation, GitHub issues, and error messages",
+      "- API references and library usage",
+      "- Best practices and design patterns",
+      "- Technical research and troubleshooting"
+    ].join("\n"),
     parameters: SearchParams,
 
-    async execute(_toolCallId, params, _signal) {
+    async execute(_toolCallId, params, signal) {
       const query = params.query;
       const maxResults = params.max_results ?? 5;
-      const searchDepth = params.search_depth ?? "advanced";
+      const searchDepth = params.search_depth ?? "basic";
       const includeDomains = params.include_domains;
       const excludeDomains = params.exclude_domains;
 
-      const { output, lastError } = await searchWithFallback(
-        query,
+      const { output, lastError } = await searchWithFallback(query, {
         maxResults,
-        { searchDepth, includeDomains, excludeDomains },
-      );
+        searchDepth,
+        includeDomains,
+        excludeDomains,
+        signal,
+      });
 
       if (output) {
         return {
@@ -402,11 +461,11 @@ export default function (pi: ExtensionAPI) {
     },
 
     renderCall(args, theme) {
-      const query = args.query as string;
-      const domains = args.include_domains as string[] | undefined;
-      const excludeDomains = args.exclude_domains as string[] | undefined;
-      const depth = (args.search_depth as string) ?? "advanced";
-      const maxResults = (args.max_results as number) ?? 5;
+      const query = args.query;
+      const domains = args.include_domains;
+      const excludeDomains = args.exclude_domains;
+      const depth = args.search_depth ?? "basic";
+      const maxResults = args.max_results ?? 5;
 
       let text =
         theme.fg("toolTitle", theme.bold("web_search ")) +
@@ -432,9 +491,9 @@ export default function (pi: ExtensionAPI) {
     renderResult(result, _opts, theme) {
       const details = result.details as SearchOutput | null;
       if (!details) {
-        const text = result.content[0];
+        const firstContent = result.content[0];
         return new Text(
-          text?.type === "text" ? text.text : "(no results)",
+          firstContent?.type === "text" ? firstContent.text : "(no results)",
           0,
           0,
         );
@@ -442,11 +501,9 @@ export default function (pi: ExtensionAPI) {
 
       const lines: string[] = [];
 
-      // Header
+      // Source & count (compact, no tool name/query repeat — renderCall already shows those)
       lines.push(
-        theme.fg("toolTitle", theme.bold("web_search ")) +
-          theme.fg("accent", details.query) +
-          theme.fg("muted", `  (${SOURCE_LABEL[details.source]}, ${details.results.length} results)`),
+        theme.fg("muted", `${SOURCE_LABEL[details.source]}, ${details.results.length} results`),
       );
 
       // AI answer (Tavily advanced mode)
@@ -502,7 +559,7 @@ export default function (pi: ExtensionAPI) {
         const tKey = getKey("tavily");
         const eKey = getKey("exa");
         const sKey = getKey("serper");
-        const mask = (k: string) => `✓ ${k.slice(0, 8)}...${k.slice(-4)}`;
+        const mask = (k: string) => k.length > 12 ? `✓ ${k.slice(0, 4)}...${k.slice(-4)}` : "✓ set";
         const priority = getPriority();
         ctx.ui.notify(
           `Web search config:\n` +
@@ -524,8 +581,7 @@ export default function (pi: ExtensionAPI) {
       // Priority override
       if (target === "priority") {
         const order = parts[1].split(",").map(s => s.trim().toLowerCase()) as ProviderId[];
-        const validProviders: ProviderId[] = ["tavily", "exa", "serper"];
-        const invalid = order.filter(p => !validProviders.includes(p));
+        const invalid = order.filter(p => !VALID_PROVIDERS.includes(p));
         if (invalid.length) {
           ctx.ui.notify(`Invalid providers: ${invalid.join(", ")}. Valid: tavily, exa, serper`, "error");
           return;
@@ -537,7 +593,7 @@ export default function (pi: ExtensionAPI) {
 
       // API key config
       const key = parts.slice(1).join(" ");
-      if (!validProviders().includes(target)) {
+      if (!VALID_PROVIDERS.includes(target as ProviderId)) {
         ctx.ui.notify("Unknown service. Use 'tavily', 'exa', or 'serper'.", "error");
         return;
       }
@@ -546,15 +602,16 @@ export default function (pi: ExtensionAPI) {
       else if (target === "exa") runtimeKeys.exa = key;
       else runtimeKeys.serper = key;
 
-      const masked = `${key.slice(0, 8)}...${key.slice(-4)}`;
+      const masked = key.length > 12 ? `${key.slice(0, 4)}...${key.slice(-4)}` : "***";
       ctx.ui.notify(
         `${target} key set: ${masked} (valid for this session)`,
         "info",
       );
     },
   });
-}
 
-function validProviders(): string[] {
-  return ["tavily", "exa", "serper"];
+  pi.on("session_shutdown", () => {
+    runtimeKeys = { tavily: undefined, exa: undefined, serper: undefined };
+    runtimePriority = undefined;
+  });
 }
