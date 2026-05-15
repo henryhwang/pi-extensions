@@ -1,6 +1,9 @@
 {
   "name": "pi-extensions",
   "private": true,
+  "dependencies": {
+    "turndown": "^7.2.4"
+  },
   "devDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",

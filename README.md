@@ -9,6 +9,7 @@ A collection of extensions for the [Pi Coding Agent](https://github.com/earendil
 | [**model-rotate**](extensions/model-rotate/) | Rotates through a pool of LLM models and guards against HTTP 429 rate-limit errors |
 | [**subagent**](extensions/subagent/) | Delegates tasks to specialized agents (scout, planner, reviewer, worker) running in isolated pi processes |
 | [**web-search**](extensions/web-search/) | Multi-provider web search (Tavily → Exa → Serper) with automatic fallback |
+| [**web-fetch**](extensions/web-fetch/) | Fetches a specific URL and extracts readable content (HTML → markdown) |
 
 ## Installation
 
