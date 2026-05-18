@@ -199,7 +199,11 @@ async function processHtml(
 			const article = reader.parse();
 
 			if (article?.content) {
-				const { document: cleanDoc } = parseHTML(cleanHtml(article.content));
+				const { document: cleanDoc } = parseHTML(article.content);
+				// Strip noise from Readability output (scripts, styles, noscript)
+				for (const el of cleanDoc.querySelectorAll("script, style, noscript")) {
+					el.remove();
+				}
 				targetDoc = cleanDoc;
 			}
 		} catch (err) {
