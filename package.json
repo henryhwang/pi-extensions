@@ -1,6 +1,10 @@
 {
   "name": "pi-extensions",
   "private": true,
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./extensions"]
+  },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
     "linkedom": "^0.18.12",

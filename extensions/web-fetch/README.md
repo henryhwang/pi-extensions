@@ -19,10 +19,23 @@ Fetches a specific URL and extracts readable content. Companion to [web_search](
 ## Installation
 
 ```bash
-ln -s /path/to/pi-extensions/extensions/web-fetch ~/.pi/agent/extensions/web-fetch
+pi install git:github.com/henryhwang/pi-extensions
 ```
 
-Then run `npm install` in the pi-extensions project directory (for dependencies) and `/reload` in pi.
+This installs all extensions from the package. Dependencies (`turndown`, `linkedom`, `@mozilla/readability`) are installed automatically via the root `package.json`.
+
+To load only web-fetch, filter in `settings.json`:
+
+```json
+{
+  "packages": [{
+    "source": "git:github.com/henryhwang/pi-extensions",
+    "extensions": ["extensions/web-fetch"]
+  }]
+}
+```
+
+Or use `pi config` to toggle individual extensions after install.
 
 ## Tool Parameters
 
@@ -82,6 +95,8 @@ Output is truncated to ~50KB (~10k tokens) and 2000 lines (pi's default limits).
 - `turndown` — HTML to markdown conversion
 - `linkedom` — server-side DOM parsing (used by both Turndown and text extraction)
 - `@mozilla/readability` (optional) — reader mode article extraction; if not installed, reader mode falls back to raw DOM
+
+These are declared in the project root `package.json` and installed automatically by `pi install`.
 
 ## File
 

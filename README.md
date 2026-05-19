@@ -14,7 +14,28 @@ A collection of extensions for the [Pi Coding Agent](https://github.com/earendil
 
 ## Installation
 
-Each extension is a self-contained directory. Symlink the ones you want into pi's extension directory:
+```bash
+pi install git:github.com/henryhwang/pi-extensions
+```
+
+This installs all 5 extensions. Dependencies (`turndown`, `linkedom`, `@mozilla/readability` for web-fetch) are installed automatically.
+
+To load only specific extensions, add a filtered entry to `settings.json`:
+
+```json
+{
+  "packages": [{
+    "source": "git:github.com/henryhwang/pi-extensions",
+    "extensions": ["extensions/web-search", "extensions/web-fetch"]
+  }]
+}
+```
+
+Or use `pi config` to toggle individual extensions after install.
+
+### Manual (symlink)
+
+For local development, symlink individual extensions into pi's extension directory:
 
 ```bash
 # Global (all projects)
@@ -25,25 +46,7 @@ mkdir -p .pi/extensions
 ln -s ../../extensions/<name> .pi/extensions/<name>
 ```
 
-For example, to install all extensions:
-
-```bash
-for ext in model-rotate requests subagent web-search web-fetch; do
-  ln -s /path/to/pi-extensions/extensions/$ext ~/.pi/agent/extensions/$ext
-done
-```
-
-Or one at a time:
-
-```bash
-ln -s /path/to/pi-extensions/extensions/model-rotate ~/.pi/agent/extensions/model-rotate
-ln -s /path/to/pi-extensions/extensions/requests ~/.pi/agent/extensions/requests
-ln -s /path/to/pi-extensions/extensions/subagent ~/.pi/agent/extensions/subagent
-ln -s /path/to/pi-extensions/extensions/web-search ~/.pi/agent/extensions/web-search
-ln -s /path/to/pi-extensions/extensions/web-fetch ~/.pi/agent/extensions/web-fetch
-```
-
-Then reload pi with `/reload` or restart.
+Then reload pi with `/reload` or restart. Run `npm install` in the project root for dependencies.
 
 ## Requirements
 
