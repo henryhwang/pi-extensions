@@ -14,14 +14,14 @@ Shows LLM API request count per model for monitoring usage against provider rate
 Total LLM requests: 64
 Messages: 8 user, 64 assistant, 80 tool results
 
-  ████████████████████████████████████████ deepseek/deepseek-v4-flash: 64
+Tokens: 512.3K total, 380.1K in, 132.2K out
+
+  deepseek/deepseek-v4-flash: 48 requests, 320.0K tokens (250.0K in / 70.0K out)
+  deepseek/deepseek-v4-pro: 16 requests, 192.3K tokens (130.1K in / 62.2K out)
 
   Each assistant message = 1 API call to the LLM provider.
   Tool calls can exceed assistant count due to parallel execution.
 ```
-
-Each `█` represents one API call. The bar gives a quick visual sense of which models
-are being hit hardest in the current session.
 
 ## How it counts
 
@@ -32,6 +32,7 @@ are being hit hardest in the current session.
   branches (from `/tree` navigation) are excluded.
 - Counts are per-session (resets when you start a new session with `/new`)
 - Displays as `provider/model` format
+- Token counts use `K`/`M` suffixes (input = prompt tokens, output = completion tokens)
 
 ## Parallel execution note
 
