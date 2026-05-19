@@ -82,3 +82,7 @@ Output is truncated to ~50KB (~10k tokens) and 2000 lines (pi's default limits).
 - `turndown` — HTML to markdown conversion
 - `linkedom` — server-side DOM parsing (used by both Turndown and text extraction)
 - `@mozilla/readability` (optional) — reader mode article extraction; if not installed, reader mode falls back to raw DOM
+
+## File
+
+- `extensions/web-fetch/index.ts` — the extension source

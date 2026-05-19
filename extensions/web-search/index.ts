@@ -9,17 +9,22 @@
  * Default order: Tavily → Exa → Serper (keyword → semantic → broad)
  * Users can override priority via /web-search-config priority <tavily|exa|serper>
  *
- * API keys can be set two ways:
- *   1. Environment:  TAVILY_API_KEY / EXA_API_KEY / SERPER_API_KEY  (persistent, preferred)
- *   2. Runtime:      /web-search-config <tavily|exa|serper> <key>  (per-session, convenient)
+ * API keys can be set three ways (checked in this order):
+ *   1. Runtime:   /web-search-config <tavily|exa|serper> <key>  (per-session)
+ *   2. Persistent: /web-search-config <tavily|exa|serper> <key>  (stored in auth.json)
+ *   3. Env vars:  TAVILY_API_KEY / EXA_API_KEY / SERPER_API_KEY
  *
- * Runtime keys are checked first, then env vars.
- * If neither is set, the tool returns a configuration error.
+ * Keys set via /web-search-config are automatically persisted to
+ * ~/.pi/agent/auth.json under the "web-search" key, so they survive
+ * restarts without needing env vars or re-entering them each session.
  */
 
 import { Type } from "@earendil-works/pi-ai";
 import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -60,21 +65,67 @@ const VALID_PROVIDERS: ProviderId[] = ["tavily", "exa", "serper"];
 
 // ── Search service config ──────────────────────────────────────
 
+/** Path to pi's auth.json credential store. */
+const AUTH_PATH = join(homedir(), ".pi", "agent", "auth.json");
+
 /** Runtime API keys (set via /web-search-config, per-session only). */
 let runtimeKeys: { tavily?: string; exa?: string; serper?: string } = {};
+
+/** Keys persisted to auth.json (loaded on startup). */
+let persistedKeys: { tavily?: string; exa?: string; serper?: string } = {};
 
 /** Runtime provider priority override. */
 let runtimePriority: ProviderId[] | undefined = undefined;
 
-function getKey(service: ProviderId): string | undefined {
-  switch (service) {
-    case "tavily":
-      return runtimeKeys.tavily || process.env.TAVILY_API_KEY;
-    case "exa":
-      return runtimeKeys.exa || process.env.EXA_API_KEY;
-    case "serper":
-      return runtimeKeys.serper || process.env.SERPER_API_KEY;
+/** Load web-search keys from pi's auth.json. */
+async function loadAuthKeys(): Promise<void> {
+  try {
+    const raw = await readFile(AUTH_PATH, "utf8");
+    const auth = JSON.parse(raw);
+    const webSearch = auth["web-search"];
+    if (webSearch?.keys) {
+      persistedKeys = {
+        tavily: webSearch.keys.tavily,
+        exa: webSearch.keys.exa,
+        serper: webSearch.keys.serper,
+      };
+    }
+  } catch {
+    // auth.json doesn't exist yet or can't be parsed — that's fine
   }
+}
+
+/** Persist a single provider key to pi's auth.json. */
+async function saveAuthKey(service: ProviderId, key: string): Promise<void> {
+  try {
+    let auth: Record<string, unknown> = {};
+    try {
+      const raw = await readFile(AUTH_PATH, "utf8");
+      auth = JSON.parse(raw);
+    } catch {
+      // file doesn't exist yet
+    }
+
+    const webSearch = (auth["web-search"] as Record<string, unknown>) ?? { type: "api_key", keys: {} };
+    webSearch.type = "api_key";
+    const keys = (webSearch.keys as Record<string, string>) ?? {};
+    keys[service] = key;
+    webSearch.keys = keys;
+    auth["web-search"] = webSearch;
+
+    await writeFile(AUTH_PATH, JSON.stringify(auth, null, 2), "utf8");
+  } catch (err) {
+    console.warn("[web-search] Failed to persist key to auth.json:", err);
+  }
+}
+
+function getKey(service: ProviderId): string | undefined {
+  // Precedence: runtime (this session) > persisted (auth.json) > env var
+  return runtimeKeys[service] || persistedKeys[service] || process.env[{
+    tavily: "TAVILY_API_KEY",
+    exa: "EXA_API_KEY",
+    serper: "SERPER_API_KEY",
+  }[service]];
 }
 
 function getPriority(): ProviderId[] {
@@ -598,19 +649,32 @@ export default function webSearchExtension(pi: ExtensionAPI) {
         return;
       }
 
-      if (target === "tavily") runtimeKeys.tavily = key;
-      else if (target === "exa") runtimeKeys.exa = key;
-      else runtimeKeys.serper = key;
+      const provider = target as ProviderId;
+      runtimeKeys[provider] = key;
+
+      // Persist to auth.json for future sessions
+      try {
+        persistedKeys[provider] = key;
+        await saveAuthKey(provider, key);
+      } catch {
+        // non-critical; runtime key still works this session
+      }
 
       const masked = key.length > 12 ? `${key.slice(0, 4)}...${key.slice(-4)}` : "***";
       ctx.ui.notify(
-        `${target} key set: ${masked} (valid for this session)`,
+        `${target} key set: ${masked} (persisted in auth.json)`,
         "info",
       );
     },
   });
 
+  // Load persisted keys on startup
+  pi.on("session_start", async () => {
+    await loadAuthKeys();
+  });
+
   pi.on("session_shutdown", () => {
+    // Clear runtime-only state; persisted keys in auth.json remain for next startup
     runtimeKeys = { tavily: undefined, exa: undefined, serper: undefined };
     runtimePriority = undefined;
   });

@@ -36,10 +36,10 @@ These agents ship with the extension and are always available:
 
 | Agent | Description | Model | Tools |
 |-------|-------------|-------|-------|
-| `scout` | Fast codebase recon that returns compressed context for handoff to other agents | `deepseek-ai/DeepSeek-V4-Flash` | read, grep, find, ls, bash |
-| `planner` | Creates implementation plans from context and requirements | `deepseek-ai/DeepSeek-V4-Pro` | read, grep, find, ls |
-| `reviewer` | Code review specialist for quality and security analysis | `deepseek-ai/DeepSeek-V4-Pro` | read, grep, find, ls, bash |
-| `worker` | General-purpose subagent with full capabilities, isolated context | `deepseek-ai/DeepSeek-V4-Pro` | (all default) |
+| `scout` | Fast codebase recon that returns compressed context for handoff to other agents | `modelscope/deepseek-ai/DeepSeek-V4-Flash` | read, grep, find, ls, bash |
+| `planner` | Creates implementation plans from context and requirements | `modelscope/deepseek-ai/DeepSeek-V4-Pro` | read, grep, find, ls |
+| `reviewer` | Code review specialist for quality and security analysis | `modelscope/moonshotai/Kimi-K2.5` | read, grep, find, ls, bash |
+| `worker` | General-purpose subagent with full capabilities, isolated context | `modelscope/deepseek-ai/DeepSeek-V4-Pro` | (all default) |
 
 ## Workflow Prompts
 
@@ -56,6 +56,11 @@ These are contributed automatically via `resources_discover` — no manual setup
 ### Single agent
 ```
 subagent(agent: "scout", task: "Find all API endpoints in this project")
+```
+
+Optionally set a custom working directory:
+```
+subagent(agent: "scout", task: "Explore src/", cwd: "/path/to/other/repo")
 ```
 
 ### Parallel execution (up to 8 tasks, 4 concurrent)
@@ -79,9 +84,16 @@ subagent(chain: [
 - `agentScope: "project"` — bundled agents + `.pi/agents/` in the project tree
 - `agentScope: "both"` — all three; project agents prompt for confirmation
 
+### Project agent confirmation
+When using `agentScope: "both"` or `agentScope: "project"`, the tool prompts for
+confirmation before running project-local agents. To skip the prompt:
+```
+subagent(agent: "scout", task: "...", agentScope: "both", confirmProjectAgents: false)
+```
+
 ### Session stats
 - Status bar shows `🚀 N` after the first subagent invocation
-- `/subagent-stats` shows total run count
+- `/subagent-stats` shows total run count per agent and mode
 
 ## Custom Agents
 
@@ -131,3 +143,9 @@ my-project/
 ```
 
 Setting `agentScope: "both"` will discover these alongside bundled and user-level agents. Project agents are repo-controlled and prompt for confirmation before running (set `confirmProjectAgents: false` to skip).
+
+## File
+
+- `extensions/subagent/index.ts` — the extension source
+- `extensions/subagent/agents/` — bundled agent definitions
+- `extensions/subagent/prompts/` — bundled workflow prompt templates

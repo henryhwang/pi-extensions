@@ -30,7 +30,29 @@ This makes Exa fire first (semantic search for conceptual queries).
 
 ## Setup
 
-### Option 1: Environment variables (persistent)
+API keys are checked in this order:
+1. **Runtime** (`/web-search-config` this session)
+2. **Persistent** (`~/.pi/agent/auth.json` — survives restarts)
+3. **Environment variable** (`TAVILY_API_KEY`, `EXA_API_KEY`, `SERPER_API_KEY`)
+
+### Option 1: Persistent via `/web-search-config` (recommended)
+
+Set keys once — they're automatically saved to pi's credential store (`~/.pi/agent/auth.json`)
+and restored on next startup. No env vars needed.
+
+```
+/web-search-config tavily tvly-xxxxxxxxxxxxxxxx
+/web-search-config exa exa-xxxxxxxxxxxxxxxx
+/web-search-config serper xxxxxxxxxxxxxxxx
+```
+
+After restart:
+```
+# Keys are still available — no setup needed
+web_search("latest pi release")
+```
+
+### Option 2: Environment variables
 
 ```bash
 # Add to ~/.bashrc or ~/.zshrc
@@ -39,21 +61,28 @@ export EXA_API_KEY="exa-xxxxxxxxxxxxxxxx"          # https://exa.ai
 export SERPER_API_KEY="xxxxxxxxxxxxxxxx"            # https://serper.dev
 ```
 
-### Option 2: Runtime config (per-session, no restart)
-
-```
-/web-search-config tavily tvly-xxxxxxxxxxxxxxxx
-/web-search-config exa exa-xxxxxxxxxxxxxxxx
-/web-search-config serper xxxxxxxxxxxxxxxx
-```
-
 ### Option 3: Show current config
 
 ```
 /web-search-config
 ```
 
-Shows all configured keys (masked) and current priority order.
+Shows all configured keys (masked), their source (runtime / auth.json / env), and current priority order.
+
+The stored key in auth.json looks like:
+```json
+{
+  "web-search": {
+    "type": "api_key",
+    "keys": {
+      "tavily": "tvly-xxxxxxxxxxxxxxxx",
+      "exa": "exa-xxxxxxxxxxxxxxxx"
+    }
+  }
+}
+```
+
+To clear a persisted key, overwrite it with an empty string or remove the `"web-search"` entry from `~/.pi/agent/auth.json` manually.
 
 ## Tool Parameters
 
@@ -99,4 +128,5 @@ web_search("react hooks tutorial", exclude_domains=["medium.com", "pinterest.com
 
 ## File
 
-- `~/.pi/agent/extensions/web-search/index.ts`
+- `extensions/web-search/index.ts` — the extension source
+- `~/.pi/agent/auth.json` — persisted API keys (pi's credential store)

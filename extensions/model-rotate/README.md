@@ -61,3 +61,7 @@ Shows current state in pi's status bar:
 - `429-guard (rpm \| 1/2 avail)` — current model is RPM-limited
 - `429-guard (quota \| 0/2 avail)` — current model at daily quota
 - `auto+429-guard (2 models)` — both features active
+
+## File
+
+- `extensions/model-rotate/index.ts` — the extension source
