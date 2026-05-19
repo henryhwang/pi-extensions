@@ -17,7 +17,7 @@
  * If neither is set, the tool returns a configuration error.
  */
 
-import { Type } from "typebox";
+import { Type } from "@earendil-works/pi-ai";
 import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
