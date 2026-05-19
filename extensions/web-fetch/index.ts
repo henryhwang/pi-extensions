@@ -29,7 +29,7 @@ import { mkdtemp, writeFile, unlink, rmdir } from "node:fs/promises";
 import { tmpdir } from "os";
 import { join, dirname } from "path";
 import TurndownService from "turndown";
-import { parseHTML } from "linkedom";
+import { parseHTML, NodeFilter } from "linkedom";
 
 // ── Types ──────────────────────────────────────────────────────
 interface FetchOutput {

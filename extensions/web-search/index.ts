@@ -20,10 +20,9 @@
  */
 
 import { Type } from "@earendil-works/pi-ai";
-import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { readFile, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
 
 // ── Types ──────────────────────────────────────────────────────
@@ -65,8 +64,8 @@ const VALID_PROVIDERS: ProviderId[] = ["tavily", "exa", "serper"];
 
 // ── Search service config ──────────────────────────────────────
 
-/** Path to pi's auth.json credential store. */
-const AUTH_PATH = join(homedir(), ".pi", "agent", "auth.json");
+/** Path to pi's auth.json credential store (respects PI_HOME). */
+const AUTH_PATH = join(getAgentDir(), "auth.json");
 
 /** Runtime API keys (set via /web-search-config, per-session only). */
 let runtimeKeys: { tavily?: string; exa?: string; serper?: string } = {};

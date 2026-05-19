@@ -14,27 +14,26 @@ function formatK(n: number): string {
   return String(n);
 }
 
+interface ModelStats {
+  count: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  totalTokens: number;
+}
+
+const ZERO: ModelStats = { count: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
+
 export default function(pi: ExtensionAPI) {
   pi.registerCommand("requests", {
     description: "Show LLM API request count and per-model breakdown for the current session branch",
     handler: async (_args, ctx) => {
       const branch = ctx.sessionManager.getBranch();
-      const byModel = new Map<string, {
-        count: number;
-        input: number;
-        output: number;
-        cacheRead: number;
-        cacheWrite: number;
-        totalTokens: number;
-      }>();
+      const byModel = new Map<string, ModelStats>();
       let assistantTotal = 0;
       let userTotal = 0;
       let toolTotal = 0;
-      let totalInput = 0;
-      let totalOutput = 0;
-      let totalCacheRead = 0;
-      let totalCacheWrite = 0;
-      let totalTokens = 0;
 
       for (const entry of branch) {
         if (entry.type === "message") {
@@ -43,27 +42,20 @@ export default function(pi: ExtensionAPI) {
           if (msg.role === "assistant") {
             assistantTotal++;
             const usage = msg.usage;
-            const inp = usage?.input ?? 0;
-            const out = usage?.output ?? 0;
-            const cr = usage?.cacheRead ?? 0;
-            const cw = usage?.cacheWrite ?? 0;
-            const tok = usage?.totalTokens ?? 0;
-            totalInput += inp;
-            totalOutput += out;
-            totalCacheRead += cr;
-            totalCacheWrite += cw;
-            totalTokens += tok;
             if (msg.model) {
               const key = `${msg.provider ?? "unknown"}/${msg.model}`;
-              const cur = byModel.get(key) ?? { count: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
-              byModel.set(key, {
-                count: cur.count + 1,
-                input: cur.input + inp,
-                output: cur.output + out,
-                cacheRead: cur.cacheRead + cr,
-                cacheWrite: cur.cacheWrite + cw,
-                totalTokens: cur.totalTokens + tok,
-              });
+              const cur = byModel.get(key) ?? { ...ZERO };
+              cur.count++;
+              const inp = usage?.input ?? 0;
+              const out = usage?.output ?? 0;
+              const cr = usage?.cacheRead ?? 0;
+              const cw = usage?.cacheWrite ?? 0;
+              cur.input += inp;
+              cur.output += out;
+              cur.cacheRead += cr;
+              cur.cacheWrite += cw;
+              cur.totalTokens += usage?.totalTokens ?? 0;
+              byModel.set(key, cur);
             }
           } else if (msg.role === "user") {
             userTotal++;
@@ -82,14 +74,25 @@ export default function(pi: ExtensionAPI) {
       } else {
         lines.push("## Requests");
         lines.push(`Total: ${assistantTotal}`);
-        for (const [model, m] of byModel.entries()) {
+        const models = Array.from(byModel.entries());
+        for (const [model, m] of models) {
           lines.push(`  ${model}: ${m.count}`);
         }
         lines.push("");
+
+        const totals = models.reduce((acc, [, m]) => ({
+          input: acc.input + m.input,
+          output: acc.output + m.output,
+          cacheRead: acc.cacheRead + m.cacheRead,
+          cacheWrite: acc.cacheWrite + m.cacheWrite,
+          totalTokens: acc.totalTokens + m.totalTokens,
+          count: 0,
+        }), { ...ZERO });
+
         lines.push("## Tokens");
-        lines.push(`Total: ${formatK(totalTokens)} (in: ${formatK(totalInput)} / out: ${formatK(totalOutput)} / cache\u00A0read: ${formatK(totalCacheRead)} / cache\u00A0write: ${formatK(totalCacheWrite)})`);
+        lines.push(`Total: ${formatK(totals.totalTokens)} (in: ${formatK(totals.input)} / out: ${formatK(totals.output)} / cache\u00A0read: ${formatK(totals.cacheRead)} / cache\u00A0write: ${formatK(totals.cacheWrite)})`);
         lines.push("");
-        for (const [model, m] of byModel.entries()) {
+        for (const [model, m] of models) {
           lines.push(`  ${model}: ${formatK(m.totalTokens)} (in: ${formatK(m.input)} / out: ${formatK(m.output)} / cache\u00A0read: ${formatK(m.cacheRead)} / cache\u00A0write: ${formatK(m.cacheWrite)})`);
         }
         lines.push("");
