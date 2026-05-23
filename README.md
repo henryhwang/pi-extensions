@@ -12,6 +12,7 @@ A collection of extensions for the [Pi Coding Agent](https://github.com/earendil
 | [**subagent**](extensions/subagent/) | Delegates tasks to specialized agents (scout, planner, reviewer, worker) running in isolated pi processes |
 | [**web-search**](extensions/web-search/) | Multi-provider web search (Tavily → Exa → Serper) with automatic fallback. Keys persist across sessions in pi's `auth.json` — set once via `/web-search-config`, survive restarts. |
 | [**web-fetch**](extensions/web-fetch/) | Fetches a specific URL and extracts readable content (HTML → markdown) |
+| [**edit**](extensions/edit/) | Enhanced `edit` tool — overrides pi's built-in with improved error messages and fuzzy whitespace matching |
 
 ## Installation
 
@@ -19,7 +20,7 @@ A collection of extensions for the [Pi Coding Agent](https://github.com/earendil
 pi install git:github.com/henryhwang/pi-extensions
 ```
 
-This installs all 6 extensions. Dependencies (`turndown`, `linkedom`, `@mozilla/readability` for web-fetch) are installed automatically.
+This installs all 7 extensions. Dependencies (`turndown`, `linkedom`, `@mozilla/readability` for web-fetch; `diff` for edit) are installed automatically.
 
 To load only specific extensions, add a filtered entry to `settings.json`:
 
