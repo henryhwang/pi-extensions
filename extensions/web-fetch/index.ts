@@ -116,6 +116,8 @@ function isSafeUrl(urlString: string): { safe: boolean; error?: string } {
 		if (/^0x[0-9a-f]+$/i.test(host)) {
 			return { safe: false, error: "Hexadecimal IP addresses are blocked" };
 		}
+		// Anchored patterns: only match at start of hostname (prevents false positives
+		// on domain names that happen to contain these prefixes)
 		if (/^(10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.|169\.254\.|fd[0-9a-f]{2}:|fe80:)/.test(host)) {
 			return { safe: false, error: "Private network addresses are blocked (SSRF protection)" };
 		}
@@ -260,10 +262,10 @@ async function processHtml(
 				.trim();
 		}
 
-		// If reader mode was requested but produced no useful output, note it
+		// If reader mode was requested but produced no useful output, note it at the top
+		// (top placement ensures visibility even when content is truncated)
 		if (readerMode && !readerSucceeded) {
-			result = result.trimEnd() +
-				"\n\n_Note: reader mode could not extract article content; fell back to full page._";
+			result = "_Note: reader mode could not extract article content; fell back to full page._\n\n" + result;
 		}
 
 		return result;
@@ -303,11 +305,12 @@ async function fetchUrl(
 
 	if (!res.ok) {
 		const errText = await res.text();
-		throw new Error(`HTTP ${res.status}: ${redactError(errText)}`);
+		throw new Error(`HTTP ${res.status} from ${res.url}: ${redactError(errText)}`);
 	}
 
 	const contentType = res.headers.get("content-type") || "text/plain";
 
+	// Early content-type check before streaming the body
 	if (isBinaryContent(contentType)) {
 		throw new Error(`Binary content detected (${contentType}). This tool only supports text/HTML/JSON.`);
 	}
@@ -448,7 +451,7 @@ export default function(pi: ExtensionAPI) {
 			}
 		},
 
-		// ... keep your existing renderCall and renderResult ...
+
 		renderCall(args, theme) {
 			const url = args.url;
 			const format = args.format ?? "markdown";

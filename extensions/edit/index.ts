@@ -10,7 +10,7 @@
  * Omits renderCall/renderResult — inherits built-in renderer (diff highlighting).
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, AgentToolUpdateCallback } from "@earendil-works/pi-coding-agent";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "@earendil-works/pi-ai";
 import * as Diff from "diff";
@@ -90,10 +90,13 @@ function normalizeForFuzzyMatch(text: string): string {
 
 /**
  * Find oldText in content, trying exact match first, then fuzzy.
+ * When content is already fuzzy-normalized, pass isFuzzy=true to skip
+ * re-normalizing content (only normalize oldText).
  */
 function fuzzyFindText(
   content: string,
   oldText: string,
+  contentIsFuzzy = false,
 ): { found: true; index: number; matchLength: number } | { found: false; index: -1; matchLength: 0 } {
   // Exact match first
   const exactIndex = content.indexOf(oldText);
@@ -102,7 +105,7 @@ function fuzzyFindText(
   }
 
   // Fuzzy match: normalized content vs normalized oldText
-  const fuzzyContent = normalizeForFuzzyMatch(content);
+  const fuzzyContent = contentIsFuzzy ? content : normalizeForFuzzyMatch(content);
   const fuzzyOldText = normalizeForFuzzyMatch(oldText);
   const fuzzyIndex = fuzzyContent.indexOf(fuzzyOldText);
   if (fuzzyIndex !== -1) {
@@ -112,9 +115,11 @@ function fuzzyFindText(
   return { found: false, index: -1, matchLength: 0 };
 }
 
-function countOccurrences(content: string, oldText: string): number {
-  const fuzzyContent = normalizeForFuzzyMatch(content);
-  const fuzzyOldText = normalizeForFuzzyMatch(oldText);
+/**
+ * Count occurrences of oldText in already-normalized fuzzy content.
+ * Accepts pre-normalized strings to avoid re-normalizing the entire file per edit.
+ */
+function countOccurrences(fuzzyContent: string, fuzzyOldText: string): number {
   let count = 0;
   let pos = 0;
   while ((pos = fuzzyContent.indexOf(fuzzyOldText, pos)) !== -1) {
@@ -125,14 +130,61 @@ function countOccurrences(content: string, oldText: string): number {
 }
 
 /**
+ * Map a position in fuzzy-normalized content back to the original (LF-only) content.
+ * Handles: tab→2-spaces expansion, trailing whitespace removal, unicode 1:1 transforms.
+ */
+function mapFuzzyPosToOriginal(original: string, fuzzy: string, fuzzyPos: number): number {
+  let oi = 0;
+  let fi = 0;
+  while (fi < fuzzyPos && oi < original.length) {
+    const oc = original[oi];
+    const fc = fuzzy[fi];
+
+    if (oc === "\t" && fc === " " && fi + 1 < fuzzy.length && fuzzy[fi + 1] === " ") {
+      // Tab expanded to 2 spaces in fuzzy
+      oi++;
+      fi += 2;
+    } else if (fc === "\n" && oc !== "\n") {
+      // Trailing whitespace removed before newline in fuzzy; skip original whitespace
+      oi++;
+    } else if (oc !== fc) {
+      // Unicode normalization (smart quotes, dashes, etc.) — 1:1 mapping
+      oi++;
+      fi++;
+    } else {
+      oi++;
+      fi++;
+    }
+  }
+  return oi;
+}
+
+/**
  * Show context around the area where oldText was expected.
+ * Uses first 3 non-empty lines (or 80 chars) of hintText for more accurate matching.
  */
 function nearbySnippet(content: string, hintText: string, contextLines = 3): string {
-  const firstLine = hintText.split("\n")[0]?.trim();
-  if (!firstLine) return "";
+  // Build search keys with increasing specificity from the first non-empty lines of hintText.
+  // Try multi-line first (more specific), fall back to fewer lines.
+  const hintLines = hintText.split("\n");
+  const nonEmpty: string[] = [];
+  for (const line of hintLines) {
+    const t = line.trim();
+    if (t) nonEmpty.push(t);
+    if (nonEmpty.length >= 3) break;
+  }
+  if (!nonEmpty.length) return "";
+
   const fuzzyContent = normalizeForFuzzyMatch(content);
-  const fuzzyHint = normalizeForFuzzyMatch(firstLine);
-  const idx = fuzzyContent.indexOf(fuzzyHint);
+
+  // Try matching with progressively fewer lines (3 → 2 → 1)
+  let idx = -1;
+  for (let n = nonEmpty.length; n >= 1; n--) {
+    const searchKey = nonEmpty.slice(0, n).join("\n");
+    const fuzzyHint = normalizeForFuzzyMatch(searchKey);
+    idx = fuzzyContent.indexOf(fuzzyHint);
+    if (idx !== -1) break;
+  }
   if (idx === -1) return "";
 
   const lines = content.split("\n");
@@ -191,24 +243,22 @@ function applyEditsWithImprovedErrors(
     }
   }
 
-  // Determine if fuzzy matching is needed
-  const exactMatches = normalizedEdits.map((e) => ({
-    oldText: e.oldText,
-    newText: e.newText,
-    match: fuzzyFindText(normalizedContent, e.oldText),
+  // Build fuzzy content once (for search/validation), normalizedContent is used for actual edits
+  const fuzzyContent = normalizeForFuzzyMatch(normalizedContent);
+  const fuzzyEdits = normalizedEdits.map((e) => ({
+    ...e,
+    fuzzyOldText: normalizeForFuzzyMatch(e.oldText),
   }));
 
-  const needsFuzzy = exactMatches.some((m) => !m.match.found);
-  const baseContent = needsFuzzy ? normalizeForFuzzyMatch(normalizedContent) : normalizedContent;
-
-  // Build matched edits
+  // First pass: validate all edits exist and are unique in fuzzy space
+  // (but record positions in original space for actual editing)
   const matchedEdits: MatchedEdit[] = [];
 
-  for (let i = 0; i < normalizedEdits.length; i++) {
+  for (let i = 0; i < fuzzyEdits.length; i++) {
     const edit = normalizedEdits[i];
-    const matchResult = fuzzyFindText(baseContent, edit.oldText);
+    const fuzzyMatch = fuzzyFindText(fuzzyContent, edit.oldText, true);
 
-    if (!matchResult.found) {
+    if (!fuzzyMatch.found) {
       // IMPROVEMENT: Show what text was searched for
       const oldTextPreview =
         edit.oldText.length > 120
@@ -222,7 +272,7 @@ function applyEditsWithImprovedErrors(
           : " (" + edit.oldText.length + " chars)";
 
       // IMPROVEMENT: Show nearby context in the file
-      const context = nearbySnippet(baseContent, edit.oldText);
+      const context = nearbySnippet(normalizedContent, edit.oldText);
 
       const prefix =
         normalizedEdits.length === 1
@@ -254,8 +304,8 @@ function applyEditsWithImprovedErrors(
       throw new Error(lines.join("\n"));
     }
 
-    // Check uniqueness
-    const occurrences = countOccurrences(baseContent, edit.oldText);
+    // Check uniqueness in fuzzy space
+    const occurrences = countOccurrences(fuzzyContent, fuzzyEdits[i].fuzzyOldText);
     if (occurrences > 1) {
       const prefix =
         normalizedEdits.length === 1
@@ -274,15 +324,19 @@ function applyEditsWithImprovedErrors(
       );
     }
 
+    // Map fuzzy match positions back to original (LF-only) content for the actual edit
+    const origStart = mapFuzzyPosToOriginal(normalizedContent, fuzzyContent, fuzzyMatch.index);
+    const origEnd = mapFuzzyPosToOriginal(normalizedContent, fuzzyContent, fuzzyMatch.index + fuzzyMatch.matchLength);
+
     matchedEdits.push({
       editIndex: i,
-      matchIndex: matchResult.index,
-      matchLength: matchResult.matchLength,
+      matchIndex: origStart,
+      matchLength: origEnd - origStart,
       newText: edit.newText,
     });
   }
 
-  // Check for overlapping edits
+  // Check for overlapping edits (in original space)
   matchedEdits.sort((a, b) => a.matchIndex - b.matchIndex);
   for (let i = 1; i < matchedEdits.length; i++) {
     const prev = matchedEdits[i - 1];
@@ -297,8 +351,8 @@ function applyEditsWithImprovedErrors(
     }
   }
 
-  // Apply right-to-left (offsets stay stable)
-  let newContent = baseContent;
+  // Apply edits to normalizedContent (original, not fuzzy) right-to-left
+  let newContent = normalizedContent;
   for (let i = matchedEdits.length - 1; i >= 0; i--) {
     const edit = matchedEdits[i];
     newContent =
@@ -307,7 +361,7 @@ function applyEditsWithImprovedErrors(
       newContent.substring(edit.matchIndex + edit.matchLength);
   }
 
-  if (baseContent === newContent) {
+  if (normalizedContent === newContent) {
     const message =
       normalizedEdits.length === 1
         ? "No changes made to " + path + ". The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected."
@@ -315,7 +369,7 @@ function applyEditsWithImprovedErrors(
     throw new Error(message);
   }
 
-  return { baseContent, newContent };
+  return { baseContent: normalizedContent, newContent };
 }
 
 // ── Generate diff string (using the `diff` package) ───────────
@@ -441,8 +495,8 @@ export default function enhancedEditExtension(pi: ExtensionAPI) {
       "Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.",
     ],
 
-    prepareArguments(input: unknown): unknown {
-      if (!input || typeof input !== "object") return input;
+    prepareArguments(input: unknown): EditInput {
+      if (!input || typeof input !== "object") return input as EditInput;
       const args = input as Record<string, unknown>;
 
       // Some models send edits as JSON string
@@ -460,18 +514,18 @@ export default function enhancedEditExtension(pi: ExtensionAPI) {
         const edits = Array.isArray(args.edits) ? [...args.edits] : [];
         edits.push({ oldText: args.oldText, newText: args.newText });
         const { oldText: _oldText, newText: _newText, ...rest } = args;
-        return { ...rest, edits };
+        return { ...rest, edits } as EditInput;
       }
 
-      return args;
+      return args as EditInput;
     },
 
     async execute(
       _toolCallId: string,
       params: EditInput,
       signal: AbortSignal | undefined,
-      _onUpdate: ((update: unknown) => void) | undefined,
-      ctx: { cwd: string },
+      _onUpdate: AgentToolUpdateCallback<{ diff: string; firstChangedLine?: number }> | undefined,
+      ctx: ExtensionContext,
     ) {
       const { path, edits } = params;
       const cwd = ctx.cwd;
