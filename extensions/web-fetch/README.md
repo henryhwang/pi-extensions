@@ -73,7 +73,14 @@ Enable `readerMode: true` for article-heavy pages (news, blogs, documentation). 
 
 - Extract the main article content
 - Remove navigation, ads, sidebars, and other boilerplate
-- Fall back to full content if Readability fails to parse
+- Automatically fall back to full page content when Readability produces empty or near-empty output
+- Appends `_Note:` to the output when fallback occurs, so you know reader mode didn't activate
+
+The fallback handles common Readability failure modes:
+- **Tables / structured data**: pricing pages, comparison tables (few `<p>` tags → Readability sees no article)
+- **Chinese portals**: heavily nested DOM with nav bars, lazy-loaded images, and non-standard layouts
+- **Doc sites**: Docusaurus, ReadTheDocs — sidebar + TOC structure confuses article detection
+- **Readability mutation**: Readability modifies the document in-place during `parse()`. The extension runs it on a cloned document so the fallback source is never corrupted.
 
 ## Truncation
 

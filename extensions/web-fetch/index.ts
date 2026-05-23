@@ -182,20 +182,31 @@ function extractTextFromDOM(node: Node): string {
 	return text;
 }
 
+/** Minimum meaningful content length for reader mode to be considered useful */
+const MIN_READER_CONTENT_LENGTH = 100;
+
 /** Optional high-quality extraction using Readability */
 async function processHtml(
 	html: string,
 	format: "markdown" | "text",
 	readerMode: boolean = false
 ): Promise<string> {
+	// Create the fallback document FIRST (before Readability mutates it)
 	const document = cleanHtml(html);
 
 	let targetDoc = document;
+	let readerSucceeded = false;
 
 	if (readerMode) {
 		try {
+			// Clone the document for Readability — it mutates in-place (strips/moves/removes nodes)
+			const { document: readerDoc } = parseHTML(html);
+			for (const el of readerDoc.querySelectorAll("script, style, nav, footer, header, aside, noscript")) {
+				el.remove();
+			}
+
 			const { Readability } = await import("@mozilla/readability");
-			const reader = new Readability(document);
+			const reader = new Readability(readerDoc);
 			const article = reader.parse();
 
 			if (article?.content) {
@@ -204,7 +215,33 @@ async function processHtml(
 				for (const el of cleanDoc.querySelectorAll("script, style, noscript")) {
 					el.remove();
 				}
-				targetDoc = cleanDoc;
+
+				// Quality check: render to final format and measure
+				let readerContent: string;
+				try {
+					if (format === "markdown") {
+						readerContent = turndownService.turndown(cleanDoc.body || cleanDoc.documentElement);
+					} else {
+						const rawText = extractTextFromDOM(cleanDoc.body || cleanDoc.documentElement);
+						readerContent = rawText
+							.replace(/\n{3,}/g, "\n\n")
+							.replace(/[ \t]+/g, " ")
+							.trim();
+					}
+				} catch {
+					readerContent = "";
+				}
+
+				// Only use reader mode output if it's meaningful
+				if (readerContent.length >= MIN_READER_CONTENT_LENGTH) {
+					targetDoc = cleanDoc;
+					readerSucceeded = true;
+				} else {
+					console.warn(
+						`[web_fetch] Readability output too short (${readerContent.length} chars), ` +
+						"falling back to raw DOM extraction"
+					);
+				}
 			}
 		} catch (err) {
 			console.warn("[web_fetch] Readability failed, falling back to raw DOM", err);
@@ -212,15 +249,24 @@ async function processHtml(
 	}
 
 	try {
+		let result: string;
 		if (format === "markdown") {
-			return turndownService.turndown(targetDoc.body || targetDoc.documentElement);
+			result = turndownService.turndown(targetDoc.body || targetDoc.documentElement);
 		} else {
 			const rawText = extractTextFromDOM(targetDoc.body || targetDoc.documentElement);
-			return rawText
+			result = rawText
 				.replace(/\n{3,}/g, "\n\n")
 				.replace(/[ \t]+/g, " ")
 				.trim();
 		}
+
+		// If reader mode was requested but produced no useful output, note it
+		if (readerMode && !readerSucceeded) {
+			result = result.trimEnd() +
+				"\n\n_Note: reader mode could not extract article content; fell back to full page._";
+		}
+
+		return result;
 	} catch (parseErr) {
 		console.warn("[web_fetch] HTML processing failed, falling back to raw text", parseErr);
 		return html;
