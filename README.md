@@ -12,7 +12,7 @@ A collection of extensions for the [Pi Coding Agent](https://github.com/earendil
 | [**subagent**](extensions/subagent/) | Delegates tasks to specialized agents (scout, planner, reviewer, worker) running in isolated pi processes |
 | [**web-search**](extensions/web-search/) | Multi-provider web search (Tavily → Exa → Serper) with automatic fallback. Keys persist across sessions in pi's `auth.json` — set once via `/web-search-config`, survive restarts. |
 | [**web-fetch**](extensions/web-fetch/) | Fetches a specific URL and extracts readable content (HTML → markdown) |
-| [**edit**](extensions/edit/) | Enhanced `edit` tool — overrides pi's built-in with improved error messages and fuzzy whitespace matching |
+| [**edit**](extensions/edit/) | Enhanced `edit` tool — overrides pi's built-in to fix file corruption on fuzzy match, add tab/space fuzzy matching, and improve error messages with nearby context |
 
 ## Installation
 

@@ -1,18 +1,22 @@
 /**
  * Enhanced Edit Tool — improved version of pi's built-in edit tool
  *
- * Fixes identified issues:
- *   1. Shows failing `oldText` in error messages (built-in hides it)
- *   2. Adds tab/space normalization to fuzzy matching
- *   3. Shows nearby file context when match fails
- *   4. More descriptive error messages overall
- *
- * Omits renderCall/renderResult — inherits built-in renderer (diff highlighting).
+ * Key improvements over built-in:
+ *   1. Fixes built-in file corruption when fuzzy matching fires
+ *      (built-in normalizes entire file, converting smart quotes/dashes on all lines;
+ *       this version maps fuzzy positions back to original content, preserving unrelated lines)
+ *   2. Adds tab→spaces fuzzy matching (built-in cannot match tabs vs spaces)
+ *   3. Shows failing oldText in error messages with nearby file context
+ *   4. More descriptive, actionable error messages
+ *   5. Custom renderCall/renderResult using enhanced matching for preview
+ *      (avoids preview/execution divergence from inherited built-in renderer)
  */
 
 import type { ExtensionAPI, ExtensionContext, AgentToolUpdateCallback } from "@earendil-works/pi-coding-agent";
-import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
-import { Type, type Static } from "@earendil-works/pi-ai";
+import { withFileMutationQueue, renderDiff } from "@earendil-works/pi-coding-agent";
+import { Type } from "@earendil-works/pi-ai";
+import type { Static } from "typebox";
+import { Box, Container, Spacer, Text } from "@earendil-works/pi-tui";
 import * as Diff from "diff";
 import { constants } from "node:fs";
 import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "node:fs/promises";
@@ -37,6 +41,14 @@ const editSchema = Type.Object({
 }, { additionalProperties: false });
 
 type EditInput = Static<typeof editSchema>;
+
+// ── Result details (matches built-in EditToolDetails contract) ─
+
+interface EditDetails {
+  diff: string;
+  patch: string;
+  firstChangedLine?: number;
+}
 
 // ── Line-ending & whitespace utils ────────────────────────────
 
@@ -65,13 +77,17 @@ function stripBom(content: string): { bom: string; text: string } {
 // ── Enhanced fuzzy matching ───────────────────────────────────
 
 /**
- * Enhanced normalization: built-in + tabs to 2 spaces.
+ * Normalize text for fuzzy matching.
+ *
+ * Unlike the built-in, this also normalizes tabs to 2 spaces and does NOT use
+ * NFKC normalization (which can expand single characters to multiple, breaking
+ * position mapping back to original content). The explicit smart-quote, dash,
+ * and space replacements are all 1:1 character transforms.
  */
 function normalizeForFuzzyMatch(text: string): string {
   return (
     text
-      .normalize("NFKC")
-      // tabs to 2 spaces (common indent mismatch)
+      // tabs to 2 spaces (common indent mismatch — not in built-in)
       .replace(/\t/g, "  ")
       // Strip trailing whitespace per line
       .split("\n")
@@ -117,7 +133,6 @@ function fuzzyFindText(
 
 /**
  * Count occurrences of oldText in already-normalized fuzzy content.
- * Accepts pre-normalized strings to avoid re-normalizing the entire file per edit.
  */
 function countOccurrences(fuzzyContent: string, fuzzyOldText: string): number {
   let count = 0;
@@ -131,7 +146,10 @@ function countOccurrences(fuzzyContent: string, fuzzyOldText: string): number {
 
 /**
  * Map a position in fuzzy-normalized content back to the original (LF-only) content.
- * Handles: tab→2-spaces expansion, trailing whitespace removal, unicode 1:1 transforms.
+ *
+ * Handles: tab→2-spaces expansion, trailing whitespace removal, 1:1 unicode transforms.
+ * All transforms in normalizeForFuzzyMatch are 1:1 character mappings except tab expansion
+ * (1→2) and trailing whitespace removal (N→0), both of which are handled explicitly.
  */
 function mapFuzzyPosToOriginal(original: string, fuzzy: string, fuzzyPos: number): number {
   let oi = 0;
@@ -147,11 +165,8 @@ function mapFuzzyPosToOriginal(original: string, fuzzy: string, fuzzyPos: number
     } else if (fc === "\n" && oc !== "\n") {
       // Trailing whitespace removed before newline in fuzzy; skip original whitespace
       oi++;
-    } else if (oc !== fc) {
-      // Unicode normalization (smart quotes, dashes, etc.) — 1:1 mapping
-      oi++;
-      fi++;
     } else {
+      // Same character, or 1:1 unicode transform (smart quotes, dashes, etc.)
       oi++;
       fi++;
     }
@@ -161,11 +176,10 @@ function mapFuzzyPosToOriginal(original: string, fuzzy: string, fuzzyPos: number
 
 /**
  * Show context around the area where oldText was expected.
- * Uses first 3 non-empty lines (or 80 chars) of hintText for more accurate matching.
+ * Uses first 3 non-empty lines of hintText for more accurate matching.
  */
 function nearbySnippet(content: string, hintText: string, contextLines = 3): string {
   // Build search keys with increasing specificity from the first non-empty lines of hintText.
-  // Try multi-line first (more specific), fall back to fewer lines.
   const hintLines = hintText.split("\n");
   const nonEmpty: string[] = [];
   for (const line of hintLines) {
@@ -178,24 +192,42 @@ function nearbySnippet(content: string, hintText: string, contextLines = 3): str
   const fuzzyContent = normalizeForFuzzyMatch(content);
 
   // Try matching with progressively fewer lines (3 → 2 → 1)
-  let idx = -1;
+  let fuzzyIdx = -1;
   for (let n = nonEmpty.length; n >= 1; n--) {
     const searchKey = nonEmpty.slice(0, n).join("\n");
     const fuzzyHint = normalizeForFuzzyMatch(searchKey);
-    idx = fuzzyContent.indexOf(fuzzyHint);
-    if (idx !== -1) break;
+    fuzzyIdx = fuzzyContent.indexOf(fuzzyHint);
+    if (fuzzyIdx !== -1) break;
   }
-  if (idx === -1) return "";
+
+  // If whole-line matching failed, try a prefix of the first non-empty line
+  // (helps when oldText has content errors like "bar" vs "foo")
+  if (fuzzyIdx === -1 && nonEmpty.length > 0) {
+    const firstLine = nonEmpty[0];
+    // Try progressively shorter prefixes: 80, 40, 20, 10, 5 chars
+    for (const prefixLen of [80, 40, 20, 10, 5]) {
+      if (prefixLen >= firstLine.length) continue;
+      const prefix = firstLine.slice(0, prefixLen);
+      // Only try if prefix is at least 5 chars and ends at a word boundary or is long enough
+      const fuzzyPrefix = normalizeForFuzzyMatch(prefix);
+      fuzzyIdx = fuzzyContent.indexOf(fuzzyPrefix);
+      if (fuzzyIdx !== -1) break;
+    }
+  }
+  if (fuzzyIdx === -1) return "";
+
+  // Map fuzzy position back to original content before line-walking
+  const origIdx = mapFuzzyPosToOriginal(content, fuzzyContent, fuzzyIdx);
 
   const lines = content.split("\n");
   let lineNum = 0;
-  let bytePos = 0;
+  let charPos = 0;
   for (let i = 0; i < lines.length; i++) {
-    if (bytePos >= idx) {
+    if (charPos >= origIdx) {
       lineNum = i;
       break;
     }
-    bytePos += lines[i].length + 1; // +1 for \n
+    charPos += lines[i].length + 1; // +1 for \n
   }
 
   const start = Math.max(0, lineNum - contextLines);
@@ -250,8 +282,7 @@ function applyEditsWithImprovedErrors(
     fuzzyOldText: normalizeForFuzzyMatch(e.oldText),
   }));
 
-  // First pass: validate all edits exist and are unique in fuzzy space
-  // (but record positions in original space for actual editing)
+  // First pass: validate all edits exist and are unique, map positions to original space
   const matchedEdits: MatchedEdit[] = [];
 
   for (let i = 0; i < fuzzyEdits.length; i++) {
@@ -305,12 +336,31 @@ function applyEditsWithImprovedErrors(
     }
 
     // Check uniqueness in fuzzy space
-    const occurrences = countOccurrences(fuzzyContent, fuzzyEdits[i].fuzzyOldText);
-    if (occurrences > 1) {
+    const fuzzyOccurrences = countOccurrences(fuzzyContent, fuzzyEdits[i].fuzzyOldText);
+    if (fuzzyOccurrences > 1) {
+      // Fuzzy match is ambiguous — check if the exact oldText is unique in original content.
+      // This handles cases where different originals normalize to the same fuzzy text
+      // (e.g., "hello\tworld" and "hello  world" both fuzzy to "hello  world").
+      const exactIdx = normalizedContent.indexOf(edit.oldText);
+      if (exactIdx !== -1) {
+        const nextIdx = normalizedContent.indexOf(edit.oldText, exactIdx + 1);
+        if (nextIdx === -1) {
+          // Unique exact match in original space — use it directly
+          matchedEdits.push({
+            editIndex: i,
+            matchIndex: exactIdx,
+            matchLength: edit.oldText.length,
+            newText: edit.newText,
+          });
+          continue;
+        }
+        // Multiple exact matches too — truly ambiguous, fall through to error
+      }
+
       const prefix =
         normalizedEdits.length === 1
-          ? "Found " + occurrences + " occurrences of the text in " + path + "."
-          : "Found " + occurrences + " occurrences of edits[" + i + "] in " + path + ".";
+          ? "Found " + fuzzyOccurrences + " occurrences of the text in " + path + "."
+          : "Found " + fuzzyOccurrences + " occurrences of edits[" + i + "] in " + path + ".";
 
       const oldTextPreview =
         edit.oldText.length > 80
@@ -372,13 +422,13 @@ function applyEditsWithImprovedErrors(
   return { baseContent: normalizedContent, newContent };
 }
 
-// ── Generate diff string (using the `diff` package) ───────────
+// ── Diff generation ───────────────────────────────────────────
 
 function generateDiffString(
   oldContent: string,
   newContent: string,
   contextLines = 4,
-): { diff: string; firstChangedLine: number } {
+): { diff: string; firstChangedLine: number | undefined } {
   const parts = Diff.diffLines(oldContent, newContent);
   const output: string[] = [];
   const oldLines = oldContent.split("\n");
@@ -467,7 +517,138 @@ function generateDiffString(
     }
   }
 
-  return { diff: output.join("\n"), firstChangedLine: firstChangedLine ?? 1 };
+  return { diff: output.join("\n"), firstChangedLine };
+}
+
+function generateUnifiedPatch(path: string, oldContent: string, newContent: string, contextLines = 4): string {
+  return Diff.createTwoFilesPatch(path, path, oldContent, newContent, undefined, undefined, {
+    context: contextLines,
+  });
+}
+
+// ── Preview computation (for renderCall) ──────────────────────
+
+type EditPreview = { diff: string; firstChangedLine: number } | { error: string };
+
+/**
+ * Compute edit preview using the enhanced matching engine.
+ * This avoids preview/execution divergence from the built-in's computeEditsDiff.
+ */
+async function computeEnhancedEditDiff(
+  path: string,
+  edits: Array<{ oldText: string; newText: string }>,
+  cwd: string,
+): Promise<EditPreview> {
+  const absolutePath = resolve(cwd, path);
+  try {
+    try {
+      await fsAccess(absolutePath, constants.R_OK);
+    } catch (error: unknown) {
+      const code =
+        error instanceof Error && "code" in error
+          ? (error as NodeJS.ErrnoException).code
+          : "UNKNOWN";
+      return { error: "Could not edit file: " + path + ". Error code: " + code + "." };
+    }
+
+    const buffer = await fsReadFile(absolutePath);
+    const rawContent = buffer.toString("utf-8");
+    const { text: content } = stripBom(rawContent);
+    const normalizedContent = normalizeToLF(content);
+
+    const { baseContent, newContent } = applyEditsWithImprovedErrors(normalizedContent, edits, path);
+    return generateDiffString(baseContent, newContent);
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// ── Rendering ─────────────────────────────────────────────────
+
+interface EditCallComponent extends Box {
+  preview?: EditPreview;
+  previewArgsKey?: string;
+  previewPending?: boolean;
+  settledError?: boolean;
+}
+
+interface EditRenderState {
+  callComponent?: EditCallComponent;
+}
+
+function createCallComponent(): EditCallComponent {
+  return Object.assign(new Box(1, 1, (text: string) => text), {
+    preview: undefined,
+    previewArgsKey: undefined,
+    previewPending: false,
+    settledError: false,
+  });
+}
+
+function getCallComponent(state: EditRenderState, lastComponent?: Component): EditCallComponent {
+  if (lastComponent instanceof Box) {
+    const component = lastComponent as EditCallComponent;
+    state.callComponent = component;
+    return component;
+  }
+  if (state.callComponent) {
+    return state.callComponent;
+  }
+  const component = createCallComponent();
+  state.callComponent = component;
+  return component;
+}
+
+function getRenderableInput(args: unknown): { path: string; edits: Array<{ oldText: string; newText: string }> } | null {
+  if (!args || typeof args !== "object") return null;
+  const a = args as Record<string, unknown>;
+  const path = typeof a.path === "string" ? a.path : null;
+  if (!path) return null;
+  if (
+    Array.isArray(a.edits) &&
+    a.edits.length > 0 &&
+    a.edits.every((e: unknown) => typeof (e as Record<string, unknown>)?.oldText === "string" && typeof (e as Record<string, unknown>)?.newText === "string")
+  ) {
+    return { path, edits: a.edits as Array<{ oldText: string; newText: string }> };
+  }
+  if (typeof a.oldText === "string" && typeof a.newText === "string") {
+    return { path, edits: [{ oldText: a.oldText as string, newText: a.newText as string }] };
+  }
+  return null;
+}
+
+// Minimal Component type for rendering
+type Component = InstanceType<typeof Box> | InstanceType<typeof Container>;
+
+function getHeaderBg(preview: EditPreview | undefined, settledError: boolean, theme: { bg: (color: string, text: string) => string }): (text: string) => string {
+  if (preview) {
+    if ("error" in preview) return (text: string) => theme.bg("toolErrorBg", text);
+    return (text: string) => theme.bg("toolSuccessBg", text);
+  }
+  if (settledError) return (text: string) => theme.bg("toolErrorBg", text);
+  return (text: string) => theme.bg("toolPendingBg", text);
+}
+
+function buildCallComponent(component: EditCallComponent, args: unknown, theme: { fg: (color: string, text: string) => string; bg: (color: string, text: string) => string; bold: (text: string) => string }): EditCallComponent {
+  component.setBgFn(getHeaderBg(component.preview, component.settledError, theme));
+  component.clear();
+
+  const rawPath = String((args as Record<string, unknown>)?.path ?? "???");
+  const header = theme.fg("toolTitle", theme.bold("edit")) + " " + theme.fg("accent", rawPath);
+  component.addChild(new Text(header, 0, 0));
+
+  if (!component.preview) {
+    return component;
+  }
+
+  const body =
+    "error" in component.preview
+      ? theme.fg("error", component.preview.error)
+      : renderDiff(component.preview.diff);
+
+  component.addChild(new Spacer(1));
+  component.addChild(new Text(body, 0, 0));
+  return component;
 }
 
 // ── Extension ─────────────────────────────────────────────────
@@ -484,6 +665,7 @@ export default function enhancedEditExtension(pi: ExtensionAPI) {
       "  * Fuzzy-matches whitespace (tabs vs spaces, trailing whitespace)",
       "  * Shows nearby file content when match fails",
       "  * Gives actionable tips on how to fix the edit",
+      "  * Preserves unrelated file content when fuzzy matching (built-in can corrupt)",
     ].join("\n"),
     parameters: editSchema,
     promptSnippet:
@@ -524,102 +706,188 @@ export default function enhancedEditExtension(pi: ExtensionAPI) {
       _toolCallId: string,
       params: EditInput,
       signal: AbortSignal | undefined,
-      _onUpdate: AgentToolUpdateCallback<{ diff: string; firstChangedLine?: number }> | undefined,
+      _onUpdate: AgentToolUpdateCallback<EditDetails> | undefined,
       ctx: ExtensionContext,
     ) {
       const { path, edits } = params;
-      const cwd = ctx.cwd;
-      const absolutePath = resolve(cwd, path);
+      const absolutePath = resolve(ctx.cwd, path);
 
-      return withFileMutationQueue(absolutePath, () =>
-        new Promise<{
-          content: Array<{ type: "text"; text: string }>;
-          details: { diff: string; firstChangedLine?: number };
-        }>((resolve, reject) => {
-          if (signal?.aborted) {
-            reject(new Error("Operation aborted"));
-            return;
-          }
+      return withFileMutationQueue(absolutePath, async () => {
+        // Check signal after each await (same pattern as built-in).
+        // Do not reject from an abort event listener: that would release the
+        // mutation queue while an in-flight filesystem operation may still finish.
+        const throwIfAborted = () => {
+          if (signal?.aborted) throw new Error("Operation aborted");
+        };
 
-          let aborted = false;
-          const onAbort = () => {
-            aborted = true;
-            reject(new Error("Operation aborted"));
-          };
-          if (signal) signal.addEventListener("abort", onAbort, { once: true });
+        throwIfAborted();
 
-          void (async () => {
-            try {
-              // Validate edits array
-              if (!Array.isArray(edits) || edits.length === 0) {
-                reject(new Error("edits must contain at least one replacement."));
-                return;
-              }
+        // Validate edits array
+        if (!Array.isArray(edits) || edits.length === 0) {
+          throw new Error("edits must contain at least one replacement.");
+        }
 
-              // Check file existence/access
-              try {
-                await fsAccess(absolutePath, constants.R_OK | constants.W_OK);
-              } catch (error: unknown) {
-                const code =
-                  error instanceof Error && "code" in error
-                    ? (error as NodeJS.ErrnoException).code
-                    : "UNKNOWN";
-                reject(new Error("Could not edit file: " + path + ". Error code: " + code + "."));
-                return;
-              }
+        // Check file existence/access
+        try {
+          await fsAccess(absolutePath, constants.R_OK | constants.W_OK);
+        } catch (error: unknown) {
+          throwIfAborted();
+          const code =
+            error instanceof Error && "code" in error
+              ? (error as NodeJS.ErrnoException).code
+              : "UNKNOWN";
+          throw new Error("Could not edit file: " + path + ". Error code: " + code + ".");
+        }
 
-              if (aborted) return;
+        throwIfAborted();
 
-              // Read file
-              const buffer = await fsReadFile(absolutePath);
-              const rawContent = buffer.toString("utf-8");
-              if (aborted) return;
+        // Read file
+        const buffer = await fsReadFile(absolutePath);
+        const rawContent = buffer.toString("utf-8");
+        throwIfAborted();
 
-              // Strip BOM
-              const { bom, text: content } = stripBom(rawContent);
-              const originalEnding = detectLineEnding(content);
-              const normalizedContent = normalizeToLF(content);
+        // Strip BOM
+        const { bom, text: content } = stripBom(rawContent);
+        const originalEnding = detectLineEnding(content);
+        const normalizedContent = normalizeToLF(content);
 
-              // Apply edits with improved error messages
-              const { baseContent, newContent } = applyEditsWithImprovedErrors(
-                normalizedContent,
-                edits,
-                path,
-              );
+        // Apply edits with improved error messages
+        const { baseContent, newContent } = applyEditsWithImprovedErrors(
+          normalizedContent,
+          edits,
+          path,
+        );
 
-              if (aborted) return;
+        throwIfAborted();
 
-              // Write
-              const finalContent = bom + restoreLineEndings(newContent, originalEnding);
-              await fsWriteFile(absolutePath, finalContent, "utf-8");
-              if (aborted) return;
+        // Write
+        const finalContent = bom + restoreLineEndings(newContent, originalEnding);
+        await fsWriteFile(absolutePath, finalContent, "utf-8");
+        throwIfAborted();
 
-              if (signal) signal.removeEventListener("abort", onAbort);
+        const diffResult = generateDiffString(baseContent, newContent);
+        const patch = generateUnifiedPatch(path, baseContent, newContent);
 
-              const diffResult = generateDiffString(baseContent, newContent);
-              resolve({
-                content: [
-                  {
-                    type: "text" as const,
-                    text: "Successfully replaced " + edits.length + " block(s) in " + path + ".",
-                  },
-                ],
-                details: {
-                  diff: diffResult.diff,
-                  firstChangedLine: diffResult.firstChangedLine,
-                },
-              });
-            } catch (error) {
-              if (signal) signal.removeEventListener("abort", onAbort);
-              if (!aborted) {
-                reject(error instanceof Error ? error : new Error(String(error)));
-              }
-            }
-          })();
-        }),
-      );
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "Successfully replaced " + edits.length + " block(s) in " + path + ".",
+            },
+          ],
+          details: {
+            diff: diffResult.diff,
+            patch,
+            firstChangedLine: diffResult.firstChangedLine,
+          } satisfies EditDetails,
+        };
+      });
     },
 
-    // No renderCall/renderResult -- inherits built-in renderer (diff, syntax highlighting)
+    // Custom rendering using the enhanced matching engine for previews.
+    // This avoids the preview/execution divergence that would occur if we
+    // inherited the built-in renderer (which uses computeEditsDiff with the
+    // built-in matching engine that lacks tab normalization).
+
+    renderCall(args: EditInput, theme: { fg: (color: string, text: string) => string; bg: (color: string, text: string) => string; bold: (text: string) => string }, context: { state: EditRenderState; lastComponent?: Component; argsComplete: boolean; invalidate: () => void; cwd: string }): Component {
+      const component = getCallComponent(context.state, context.lastComponent);
+      const previewInput = getRenderableInput(args);
+      const argsKey = previewInput
+        ? JSON.stringify({ path: previewInput.path, edits: previewInput.edits })
+        : undefined;
+
+      // Reset if args changed
+      if (component.previewArgsKey !== argsKey) {
+        component.preview = undefined;
+        component.previewArgsKey = argsKey;
+        component.previewPending = false;
+        component.settledError = false;
+      }
+
+      // Compute preview asynchronously when args are complete
+      if (context.argsComplete && previewInput && !component.preview && !component.previewPending) {
+        component.previewPending = true;
+        const requestKey = argsKey;
+        void computeEnhancedEditDiff(previewInput.path, previewInput.edits, context.cwd).then(
+          (preview) => {
+            if (component.previewArgsKey === requestKey) {
+              component.preview = preview;
+              component.previewArgsKey = requestKey;
+              component.previewPending = false;
+              context.invalidate();
+            }
+          },
+        );
+      }
+
+      return buildCallComponent(component, args, theme);
+    },
+
+    renderResult(
+      result: { content: Array<{ type: string; text: string }>; details?: EditDetails; isError?: boolean },
+      _options: { expanded: boolean; isPartial: boolean },
+      theme: { fg: (color: string, text: string) => string; bg: (color: string, text: string) => string; bold: (text: string) => string },
+      context: { state: EditRenderState; lastComponent?: Component; args?: EditInput; isError: boolean },
+    ): Component {
+      const callComponent = context.state.callComponent;
+      const previewInput = getRenderableInput(context.args);
+      const argsKey = previewInput
+        ? JSON.stringify({ path: previewInput.path, edits: previewInput.edits })
+        : undefined;
+
+      const resultDiff = !context.isError ? result.details?.diff : undefined;
+      let changed = false;
+
+      if (callComponent) {
+        // Update preview with actual result diff
+        if (typeof resultDiff === "string") {
+          const newPreview: EditPreview = {
+            diff: resultDiff,
+            firstChangedLine: result.details?.firstChangedLine,
+          };
+          // Only update if different from current preview
+          if (
+            !callComponent.preview ||
+            "error" in callComponent.preview ||
+            callComponent.preview.diff !== resultDiff
+          ) {
+            callComponent.preview = newPreview;
+            callComponent.previewArgsKey = argsKey;
+            changed = true;
+          }
+        }
+
+        // Update error state
+        if (callComponent.settledError !== context.isError) {
+          callComponent.settledError = context.isError;
+          changed = true;
+        }
+
+        if (changed) {
+          buildCallComponent(callComponent, context.args, theme);
+        }
+      }
+
+      // Render result body
+      const component = (context.lastComponent as Container) ?? new Container();
+      component.clear();
+
+      if (context.isError) {
+        const errorText = result.content
+          .filter((c) => c.type === "text")
+          .map((c) => c.text || "")
+          .join("\n");
+        if (errorText) {
+          component.addChild(new Spacer(1));
+          component.addChild(new Text(theme.fg("error", errorText), 0, 0));
+        }
+        return component;
+      }
+
+      // For successful results, the diff is already shown in the call component
+      // (via the preview mechanism). Only add extra output if there's something
+      // not already displayed.
+      return component;
+    },
   });
 }
