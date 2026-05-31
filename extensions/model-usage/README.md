@@ -14,7 +14,7 @@ Tracks ModelScope API rate-limit quotas from HTTP response headers and displays 
 | `modelscope-ratelimit-model-requests-limit` | Model limit | Per-model request quota |
 | `modelscope-ratelimit-model-requests-remaining` | Model remaining | Remaining per-model requests |
 
-- **Only tracks ModelScope**: ignores responses from other providers (`ctx.model?.provider !== "modelscope"`)
+- **Supports all ModelScope variants**: tracks responses from `modelscope`, `modelscope-xiaoxu`, and any other provider name starting with `modelscope`
 - **Session persistence**: quota data is saved to the session via `pi.appendEntry` and restored on start/reload
 - **Per-model storage**: separate quota tracking for each model ID (e.g., `deepseek-ai/DeepSeek-V4-Pro`)
 

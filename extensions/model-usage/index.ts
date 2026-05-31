@@ -35,8 +35,9 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", (_e, ctx) => rebuild(ctx));
 
   // ── Capture ModelScope quota headers from HTTP response ──
+  // Note: Matches both "modelscope" and "modelscope-xiaoxu" providers
   pi.on("after_provider_response", (event: any, ctx) => {
-    if (ctx.model?.provider !== "modelscope") return;
+    if (!ctx.model?.provider.startsWith("modelscope")) return;
 
     const headers = event.headers ?? {};
 

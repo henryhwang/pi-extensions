@@ -12,8 +12,26 @@ Detects rate-limit errors and applies model-specific cooldowns:
 
 | 429 type | Detection | Cooldown | Behavior |
 |----------|-----------|----------|----------|
-| **RPM** (requests per minute) | `rate limit` / `too many requests` | 60 seconds | Waits for cooldown, then retries |
-| **Quota** (daily exhausted) | `quota` / `exceeded your current` / `billing` | 1 hour | Gives up immediately if all models at quota |
+| **RPM** (temporary rate limit) | `rate limit` / `too many requests` / `quota exceeded` / `exceeded your current quota` — **without explicit timeline** | 60 seconds | Waits for cooldown, then retries |
+| **Quota** (daily/monthly exhausted) | Contains `try again tomorrow`, `today's quota`, `daily limit`, or `monthly limit` | 1 hour | Gives up immediately if all models at quota |
+
+#### ModelScope Error Examples
+
+ModelScope returns two distinct 429 formats with **opposite** handling from pi core:
+
+**Error Type A** (retryable → RPM):
+> *"You exceeded your current quota, please check your plan and billing details"*
+
+- No explicit timeline ("tomorrow", "today") → classifies as **RPM**
+- "Check your billing details" is informational, not a payment demand
+- Wait ~60s, then retry or rotate to next model
+
+**Error Type B** (non-retryable → Quota):
+> *"You have exceeded today's quota for model ZhipuAI/GLM-5.1, please try again tomorrow, or consider using other models"*
+
+- Contains `today's quota` + `try again tomorrow` → classifies as **Quota**
+- Explicit 24-hour reset window — don't waste retries
+- If all pool models hit this, extension gives up until tomorrow
 
 ## Configuration
 

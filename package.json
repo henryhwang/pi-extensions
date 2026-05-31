@@ -1,9 +1,15 @@
 {
   "name": "pi-extensions",
   "private": true,
+  "type": "module",
   "keywords": [
     "pi-package"
   ],
+  "scripts": {
+    "lint": "biome lint --write",
+    "format": "biome format --write",
+    "check": "biome check --write"
+  },
   "pi": {
     "extensions": [
       "./extensions"
@@ -15,13 +21,8 @@
     "linkedom": "^0.18.12",
     "turndown": "^7.2.4"
   },
-  "scripts": {
-    "lint": "biome lint --write",
-    "format": "biome format --write",
-    "check": "biome check --write"
-  },
   "devDependencies": {
-    "@biomejs/biome": "2.4.15",
+    "@biomejs/biome": "^2.4.15",
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
