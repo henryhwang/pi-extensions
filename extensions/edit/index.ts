@@ -12,33 +12,50 @@
  *      (avoids preview/execution divergence from inherited built-in renderer)
  */
 
-import type { ExtensionAPI, ExtensionContext, AgentToolUpdateCallback } from "@earendil-works/pi-coding-agent";
-import { withFileMutationQueue, renderDiff } from "@earendil-works/pi-coding-agent";
-import { Type } from "@earendil-works/pi-ai";
-import type { Static } from "typebox";
-import { Box, Container, Spacer, Text } from "@earendil-works/pi-tui";
-import * as Diff from "diff";
 import { constants } from "node:fs";
-import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "node:fs/promises";
+import {
+  access as fsAccess,
+  readFile as fsReadFile,
+  writeFile as fsWriteFile,
+} from "node:fs/promises";
 import { resolve } from "node:path";
+import { Type } from "@earendil-works/pi-ai";
+import {
+  type AgentToolResult,
+  type AgentToolUpdateCallback,
+  type ExtensionAPI,
+  type ExtensionContext,
+  renderDiff,
+  type Theme,
+  withFileMutationQueue,
+} from "@earendil-works/pi-coding-agent";
+import { Box, type Component, Container, Spacer, Text } from "@earendil-works/pi-tui";
+import * as Diff from "diff";
+import type { Static } from "typebox";
 
 // ── Schema (same as built-in) ─────────────────────────────────
 
-const replaceEditSchema = Type.Object({
-  oldText: Type.String({
-    description:
-      "Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call.",
-  }),
-  newText: Type.String({ description: "Replacement text for this targeted edit." }),
-}, { additionalProperties: false });
+const replaceEditSchema = Type.Object(
+  {
+    oldText: Type.String({
+      description:
+        "Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call.",
+    }),
+    newText: Type.String({ description: "Replacement text for this targeted edit." }),
+  },
+  { additionalProperties: false },
+);
 
-const editSchema = Type.Object({
-  path: Type.String({ description: "Path to the file to edit (relative or absolute)" }),
-  edits: Type.Array(replaceEditSchema, {
-    description:
-      "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
-  }),
-}, { additionalProperties: false });
+const editSchema = Type.Object(
+  {
+    path: Type.String({ description: "Path to the file to edit (relative or absolute)" }),
+    edits: Type.Array(replaceEditSchema, {
+      description:
+        "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
+    }),
+  },
+  { additionalProperties: false },
+);
 
 type EditInput = Static<typeof editSchema>;
 
@@ -113,7 +130,9 @@ function fuzzyFindText(
   content: string,
   oldText: string,
   contentIsFuzzy = false,
-): { found: true; index: number; matchLength: number } | { found: false; index: -1; matchLength: 0 } {
+):
+  | { found: true; index: number; matchLength: number }
+  | { found: false; index: -1; matchLength: 0 } {
   // Exact match first
   const exactIndex = content.indexOf(oldText);
   if (exactIndex !== -1) {
@@ -136,10 +155,10 @@ function fuzzyFindText(
  */
 function countOccurrences(fuzzyContent: string, fuzzyOldText: string): number {
   let count = 0;
-  let pos = 0;
-  while ((pos = fuzzyContent.indexOf(fuzzyOldText, pos)) !== -1) {
+  let pos = fuzzyContent.indexOf(fuzzyOldText, 0);
+  while (pos !== -1) {
     count++;
-    pos += fuzzyOldText.length;
+    pos = fuzzyContent.indexOf(fuzzyOldText, pos + fuzzyOldText.length);
   }
   return count;
 }
@@ -238,7 +257,7 @@ function nearbySnippet(content: string, hintText: string, contextLines = 3): str
   for (let i = start; i < end; i++) {
     const marker = i === lineNum ? ">" : " ";
     const num = String(i + 1).padStart(lineWidth, " ");
-    snippet.push(marker + " " + num + " | " + lines[i]);
+    snippet.push(`${marker} ${num} | ${lines[i]}`);
   }
 
   return snippet.join("\n");
@@ -269,8 +288,8 @@ function applyEditsWithImprovedErrors(
     if (normalizedEdits[i].oldText.length === 0) {
       const prefix =
         normalizedEdits.length === 1
-          ? "oldText must not be empty in " + path + "."
-          : "edits[" + i + "].oldText must not be empty in " + path + ".";
+          ? `oldText must not be empty in ${path}.`
+          : `edits[${i}].oldText must not be empty in ${path}.`;
       throw new Error(prefix);
     }
   }
@@ -292,31 +311,29 @@ function applyEditsWithImprovedErrors(
     if (!fuzzyMatch.found) {
       // IMPROVEMENT: Show what text was searched for
       const oldTextPreview =
-        edit.oldText.length > 120
-          ? edit.oldText.slice(0, 120) + "..."
-          : edit.oldText;
+        edit.oldText.length > 120 ? `${edit.oldText.slice(0, 120)}...` : edit.oldText;
       const firstLine = edit.oldText.split("\n")[0] || "(empty)";
       const lineCount = edit.oldText.split("\n").length;
       const sizeHint =
         lineCount > 1
-          ? " (" + lineCount + " lines, " + edit.oldText.length + " chars)"
-          : " (" + edit.oldText.length + " chars)";
+          ? ` (${lineCount} lines, ${edit.oldText.length} chars)`
+          : ` (${edit.oldText.length} chars)`;
 
       // IMPROVEMENT: Show nearby context in the file
       const context = nearbySnippet(normalizedContent, edit.oldText);
 
       const prefix =
         normalizedEdits.length === 1
-          ? "Could not find the exact text in " + path + "."
-          : "Could not find edits[" + i + "] in " + path + ".";
+          ? `Could not find the exact text in ${path}.`
+          : `Could not find edits[${i}] in ${path}.`;
 
       const lines: string[] = [
         prefix,
         "",
         "Searched for:",
-        "  " + oldTextPreview + sizeHint,
+        `  ${oldTextPreview}${sizeHint}`,
         "",
-        'First line: "' + firstLine + '"',
+        `First line: "${firstLine}"`,
       ];
 
       if (context) {
@@ -359,24 +376,29 @@ function applyEditsWithImprovedErrors(
 
       const prefix =
         normalizedEdits.length === 1
-          ? "Found " + fuzzyOccurrences + " occurrences of the text in " + path + "."
-          : "Found " + fuzzyOccurrences + " occurrences of edits[" + i + "] in " + path + ".";
+          ? `Found ${fuzzyOccurrences} occurrences of the text in ${path}.`
+          : `Found ${fuzzyOccurrences} occurrences of edits[${i}] in ${path}.`;
 
       const oldTextPreview =
-        edit.oldText.length > 80
-          ? edit.oldText.slice(0, 80) + "..."
-          : edit.oldText;
+        edit.oldText.length > 80 ? `${edit.oldText.slice(0, 80)}...` : edit.oldText;
 
       throw new Error(
-        prefix + " Each oldText must be unique.\n" +
-          'Searched text: "' + oldTextPreview + '"\n' +
+        prefix +
+          " Each oldText must be unique.\n" +
+          'Searched text: "' +
+          oldTextPreview +
+          '"\n' +
           "Please provide more context (surrounding lines) to make it unique.",
       );
     }
 
     // Map fuzzy match positions back to original (LF-only) content for the actual edit
     const origStart = mapFuzzyPosToOriginal(normalizedContent, fuzzyContent, fuzzyMatch.index);
-    const origEnd = mapFuzzyPosToOriginal(normalizedContent, fuzzyContent, fuzzyMatch.index + fuzzyMatch.matchLength);
+    const origEnd = mapFuzzyPosToOriginal(
+      normalizedContent,
+      fuzzyContent,
+      fuzzyMatch.index + fuzzyMatch.matchLength,
+    );
 
     matchedEdits.push({
       editIndex: i,
@@ -393,10 +415,23 @@ function applyEditsWithImprovedErrors(
     const curr = matchedEdits[i];
     if (prev.matchIndex + prev.matchLength > curr.matchIndex) {
       throw new Error(
-        "edits[" + prev.editIndex + "] and edits[" + curr.editIndex + "] overlap in " + path + ". " +
+        "edits[" +
+          prev.editIndex +
+          "] and edits[" +
+          curr.editIndex +
+          "] overlap in " +
+          path +
+          ". " +
           "Merge them into one edit or target disjoint regions.\n" +
-          "  edits[" + prev.editIndex + "] ends at position " + (prev.matchIndex + prev.matchLength) + "\n" +
-          "  edits[" + curr.editIndex + "] starts at position " + curr.matchIndex,
+          "  edits[" +
+          prev.editIndex +
+          "] ends at position " +
+          (prev.matchIndex + prev.matchLength) +
+          "\n" +
+          "  edits[" +
+          curr.editIndex +
+          "] starts at position " +
+          curr.matchIndex,
       );
     }
   }
@@ -414,8 +449,10 @@ function applyEditsWithImprovedErrors(
   if (normalizedContent === newContent) {
     const message =
       normalizedEdits.length === 1
-        ? "No changes made to " + path + ". The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected."
-        : "No changes made to " + path + ". The replacements produced identical content.";
+        ? "No changes made to " +
+          path +
+          ". The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected."
+        : `No changes made to ${path}. The replacements produced identical content.`;
     throw new Error(message);
   }
 
@@ -442,16 +479,18 @@ function generateDiffString(
 
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i];
-    const raw = part.value.endsWith("\n") ? part.value.slice(0, -1).split("\n") : part.value.split("\n");
+    const raw = part.value.endsWith("\n")
+      ? part.value.slice(0, -1).split("\n")
+      : part.value.split("\n");
 
     if (part.added || part.removed) {
       if (firstChangedLine === undefined) firstChangedLine = newLineNum;
       for (const line of raw) {
         if (part.added) {
-          output.push("+" + String(newLineNum).padStart(lineNumWidth, " ") + " " + line);
+          output.push(`+${String(newLineNum).padStart(lineNumWidth, " ")} ${line}`);
           newLineNum++;
         } else {
-          output.push("-" + String(oldLineNum).padStart(lineNumWidth, " ") + " " + line);
+          output.push(`-${String(oldLineNum).padStart(lineNumWidth, " ")} ${line}`);
           oldLineNum++;
         }
       }
@@ -464,7 +503,7 @@ function generateDiffString(
       if (hasLeading && hasTrailing) {
         if (raw.length <= contextLines * 2) {
           for (const line of raw) {
-            output.push(" " + String(oldLineNum).padStart(lineNumWidth, " ") + " " + line);
+            output.push(` ${String(oldLineNum).padStart(lineNumWidth, " ")} ${line}`);
             oldLineNum++;
             newLineNum++;
           }
@@ -472,15 +511,15 @@ function generateDiffString(
           const leading = raw.slice(0, contextLines);
           const trailing = raw.slice(raw.length - contextLines);
           for (const line of leading) {
-            output.push(" " + String(oldLineNum).padStart(lineNumWidth, " ") + " " + line);
+            output.push(` ${String(oldLineNum).padStart(lineNumWidth, " ")} ${line}`);
             oldLineNum++;
             newLineNum++;
           }
-          output.push(" " + "".padStart(lineNumWidth, " ") + " ...");
+          output.push(` ${"".padStart(lineNumWidth, " ")} ...`);
           oldLineNum += raw.length - leading.length - trailing.length;
           newLineNum += raw.length - leading.length - trailing.length;
           for (const line of trailing) {
-            output.push(" " + String(oldLineNum).padStart(lineNumWidth, " ") + " " + line);
+            output.push(` ${String(oldLineNum).padStart(lineNumWidth, " ")} ${line}`);
             oldLineNum++;
             newLineNum++;
           }
@@ -488,24 +527,24 @@ function generateDiffString(
       } else if (hasLeading) {
         const shown = raw.slice(0, contextLines);
         for (const line of shown) {
-          output.push(" " + String(oldLineNum).padStart(lineNumWidth, " ") + " " + line);
+          output.push(` ${String(oldLineNum).padStart(lineNumWidth, " ")} ${line}`);
           oldLineNum++;
           newLineNum++;
         }
         if (raw.length > contextLines) {
-          output.push(" " + "".padStart(lineNumWidth, " ") + " ...");
+          output.push(` ${"".padStart(lineNumWidth, " ")} ...`);
           oldLineNum += raw.length - contextLines;
           newLineNum += raw.length - contextLines;
         }
       } else if (hasTrailing) {
         const skipped = Math.max(0, raw.length - contextLines);
         if (skipped > 0) {
-          output.push(" " + "".padStart(lineNumWidth, " ") + " ...");
+          output.push(` ${"".padStart(lineNumWidth, " ")} ...`);
           oldLineNum += skipped;
           newLineNum += skipped;
         }
         for (const line of raw.slice(skipped)) {
-          output.push(" " + String(oldLineNum).padStart(lineNumWidth, " ") + " " + line);
+          output.push(` ${String(oldLineNum).padStart(lineNumWidth, " ")} ${line}`);
           oldLineNum++;
           newLineNum++;
         }
@@ -520,7 +559,12 @@ function generateDiffString(
   return { diff: output.join("\n"), firstChangedLine };
 }
 
-function generateUnifiedPatch(path: string, oldContent: string, newContent: string, contextLines = 4): string {
+function generateUnifiedPatch(
+  path: string,
+  oldContent: string,
+  newContent: string,
+  contextLines = 4,
+): string {
   return Diff.createTwoFilesPatch(path, path, oldContent, newContent, undefined, undefined, {
     context: contextLines,
   });
@@ -528,7 +572,7 @@ function generateUnifiedPatch(path: string, oldContent: string, newContent: stri
 
 // ── Preview computation (for renderCall) ──────────────────────
 
-type EditPreview = { diff: string; firstChangedLine: number } | { error: string };
+type EditPreview = { diff: string; firstChangedLine?: number } | { error: string };
 
 /**
  * Compute edit preview using the enhanced matching engine.
@@ -548,7 +592,7 @@ async function computeEnhancedEditDiff(
         error instanceof Error && "code" in error
           ? (error as NodeJS.ErrnoException).code
           : "UNKNOWN";
-      return { error: "Could not edit file: " + path + ". Error code: " + code + "." };
+      return { error: `Could not edit file: ${path}. Error code: ${code}.` };
     }
 
     const buffer = await fsReadFile(absolutePath);
@@ -556,7 +600,11 @@ async function computeEnhancedEditDiff(
     const { text: content } = stripBom(rawContent);
     const normalizedContent = normalizeToLF(content);
 
-    const { baseContent, newContent } = applyEditsWithImprovedErrors(normalizedContent, edits, path);
+    const { baseContent, newContent } = applyEditsWithImprovedErrors(
+      normalizedContent,
+      edits,
+      path,
+    );
     return generateDiffString(baseContent, newContent);
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) };
@@ -599,7 +647,9 @@ function getCallComponent(state: EditRenderState, lastComponent?: Component): Ed
   return component;
 }
 
-function getRenderableInput(args: unknown): { path: string; edits: Array<{ oldText: string; newText: string }> } | null {
+function getRenderableInput(
+  args: unknown,
+): { path: string; edits: Array<{ oldText: string; newText: string }> } | null {
   if (!args || typeof args !== "object") return null;
   const a = args as Record<string, unknown>;
   const path = typeof a.path === "string" ? a.path : null;
@@ -607,7 +657,11 @@ function getRenderableInput(args: unknown): { path: string; edits: Array<{ oldTe
   if (
     Array.isArray(a.edits) &&
     a.edits.length > 0 &&
-    a.edits.every((e: unknown) => typeof (e as Record<string, unknown>)?.oldText === "string" && typeof (e as Record<string, unknown>)?.newText === "string")
+    a.edits.every(
+      (e: unknown) =>
+        typeof (e as Record<string, unknown>)?.oldText === "string" &&
+        typeof (e as Record<string, unknown>)?.newText === "string",
+    )
   ) {
     return { path, edits: a.edits as Array<{ oldText: string; newText: string }> };
   }
@@ -617,10 +671,11 @@ function getRenderableInput(args: unknown): { path: string; edits: Array<{ oldTe
   return null;
 }
 
-// Minimal Component type for rendering
-type Component = InstanceType<typeof Box> | InstanceType<typeof Container>;
-
-function getHeaderBg(preview: EditPreview | undefined, settledError: boolean, theme: { bg: (color: string, text: string) => string }): (text: string) => string {
+function getHeaderBg(
+  preview: EditPreview | undefined,
+  settledError: boolean,
+  theme: Theme,
+): (text: string) => string {
   if (preview) {
     if ("error" in preview) return (text: string) => theme.bg("toolErrorBg", text);
     return (text: string) => theme.bg("toolSuccessBg", text);
@@ -629,12 +684,16 @@ function getHeaderBg(preview: EditPreview | undefined, settledError: boolean, th
   return (text: string) => theme.bg("toolPendingBg", text);
 }
 
-function buildCallComponent(component: EditCallComponent, args: unknown, theme: { fg: (color: string, text: string) => string; bg: (color: string, text: string) => string; bold: (text: string) => string }): EditCallComponent {
-  component.setBgFn(getHeaderBg(component.preview, component.settledError, theme));
+function buildCallComponent(
+  component: EditCallComponent,
+  args: unknown,
+  theme: Theme,
+): EditCallComponent {
+  component.setBgFn(getHeaderBg(component.preview, component.settledError ?? false, theme));
   component.clear();
 
   const rawPath = String((args as Record<string, unknown>)?.path ?? "???");
-  const header = theme.fg("toolTitle", theme.bold("edit")) + " " + theme.fg("accent", rawPath);
+  const header = `${theme.fg("toolTitle", theme.bold("edit"))} ${theme.fg("accent", rawPath)}`;
   component.addChild(new Text(header, 0, 0));
 
   if (!component.preview) {
@@ -736,7 +795,7 @@ export default function enhancedEditExtension(pi: ExtensionAPI) {
             error instanceof Error && "code" in error
               ? (error as NodeJS.ErrnoException).code
               : "UNKNOWN";
-          throw new Error("Could not edit file: " + path + ". Error code: " + code + ".");
+          throw new Error(`Could not edit file: ${path}. Error code: ${code}.`);
         }
 
         throwIfAborted();
@@ -772,7 +831,7 @@ export default function enhancedEditExtension(pi: ExtensionAPI) {
           content: [
             {
               type: "text" as const,
-              text: "Successfully replaced " + edits.length + " block(s) in " + path + ".",
+              text: `Successfully replaced ${edits.length} block(s) in ${path}.`,
             },
           ],
           details: {
@@ -789,7 +848,17 @@ export default function enhancedEditExtension(pi: ExtensionAPI) {
     // inherited the built-in renderer (which uses computeEditsDiff with the
     // built-in matching engine that lacks tab normalization).
 
-    renderCall(args: EditInput, theme: { fg: (color: string, text: string) => string; bg: (color: string, text: string) => string; bold: (text: string) => string }, context: { state: EditRenderState; lastComponent?: Component; argsComplete: boolean; invalidate: () => void; cwd: string }): Component {
+    renderCall(
+      args: EditInput,
+      theme: Theme,
+      context: {
+        state: EditRenderState;
+        lastComponent?: Component;
+        argsComplete: boolean;
+        invalidate: () => void;
+        cwd: string;
+      },
+    ): Component {
       const component = getCallComponent(context.state, context.lastComponent);
       const previewInput = getRenderableInput(args);
       const argsKey = previewInput
@@ -824,10 +893,15 @@ export default function enhancedEditExtension(pi: ExtensionAPI) {
     },
 
     renderResult(
-      result: { content: Array<{ type: string; text: string }>; details?: EditDetails; isError?: boolean },
+      result: AgentToolResult<EditDetails>,
       _options: { expanded: boolean; isPartial: boolean },
-      theme: { fg: (color: string, text: string) => string; bg: (color: string, text: string) => string; bold: (text: string) => string },
-      context: { state: EditRenderState; lastComponent?: Component; args?: EditInput; isError: boolean },
+      theme: Theme,
+      context: {
+        state: EditRenderState;
+        lastComponent?: Component;
+        args?: EditInput;
+        isError: boolean;
+      },
     ): Component {
       const callComponent = context.state.callComponent;
       const previewInput = getRenderableInput(context.args);
@@ -843,7 +917,7 @@ export default function enhancedEditExtension(pi: ExtensionAPI) {
         if (typeof resultDiff === "string") {
           const newPreview: EditPreview = {
             diff: resultDiff,
-            firstChangedLine: result.details?.firstChangedLine,
+            firstChangedLine: result.details?.firstChangedLine ?? 1,
           };
           // Only update if different from current preview
           if (

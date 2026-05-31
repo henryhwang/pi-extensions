@@ -17,8 +17,8 @@
 
 import type {
   ExtensionAPI,
-  ExtensionContext,
   ExtensionCommandContext,
+  ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 
 // ── Configure your model pool here ──────────────────────────────
@@ -37,8 +37,8 @@ type RateLimitType = "rpm" | "quota";
 
 /** Cooldown durations per 429 type */
 const COOLDOWNS: Record<RateLimitType, number> = {
-  rpm: 60_000,       // 1 minute — RPM limits reset quickly
-  quota: 3_600_000,  // 1 hour — daily quota won't reset sooner
+  rpm: 60_000, // 1 minute — RPM limits reset quickly
+  quota: 3_600_000, // 1 hour — daily quota won't reset sooner
 };
 
 function classify429(errorMessage: string): RateLimitType {
@@ -82,9 +82,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function markRateLimited(provider: string, id: string, type: RateLimitType) {
-    const idx = MODEL_POOL.findIndex(
-      (m) => m.provider === provider && m.id === id,
-    );
+    const idx = MODEL_POOL.findIndex((m) => m.provider === provider && m.id === id);
     if (idx >= 0) {
       const existingUntil = rateLimitedUntil.get(idx);
       const newUntil = Date.now() + COOLDOWNS[type];
@@ -178,10 +176,7 @@ export default function (pi: ExtensionAPI) {
             `${modeStr} (${available} avail, ${detail.join(", ")} cooling)`,
           );
         } else {
-          ctx.ui.setStatus(
-            "rotate",
-            `${modeStr} (${MODEL_POOL.length} models)`,
-          );
+          ctx.ui.setStatus("rotate", `${modeStr} (${MODEL_POOL.length} models)`);
         }
       } else {
         ctx.ui.setStatus("rotate", `${modeStr} idle (not in pool)`);
@@ -252,10 +247,7 @@ export default function (pi: ExtensionAPI) {
       );
       return true;
     } else {
-      ctx.ui.notify(
-        `Model ${next.provider}/${next.id} not available (no API key?)`,
-        "error",
-      );
+      ctx.ui.notify(`Model ${next.provider}/${next.id} not available (no API key?)`, "error");
       return false;
     }
   }
@@ -267,10 +259,7 @@ export default function (pi: ExtensionAPI) {
     if (!rotateOn429) return;
 
     const msg = event.message;
-    if (
-      msg.role === "assistant" &&
-      (msg.stopReason === "error" || msg.errorMessage)
-    ) {
+    if (msg.role === "assistant" && (msg.stopReason === "error" || msg.errorMessage)) {
       const errText = msg.errorMessage || "";
       if (errText.includes("429") || /rate.?limit|too many requests/i.test(errText)) {
         const type = classify429(errText);
@@ -333,10 +322,7 @@ export default function (pi: ExtensionAPI) {
       // All models are rate-limited
       if (allRateLimitedAreQuota()) {
         // Daily quota exhausted everywhere — waiting won't help
-        ctx.ui.notify(
-          "429-guard: all models at daily quota. No point waiting.",
-          "error",
-        );
+        ctx.ui.notify("429-guard: all models at daily quota. No point waiting.", "error");
         updateStatus(ctx);
         return; // let the request fail, nothing we can do
       }
@@ -440,9 +426,7 @@ export default function (pi: ExtensionAPI) {
       const currentModel = ctx.model;
       const lines = MODEL_POOL.map((m, i) => {
         const isCurrent =
-          currentModel &&
-          currentModel.provider === m.provider &&
-          currentModel.id === m.id;
+          currentModel && currentModel.provider === m.provider && currentModel.id === m.id;
         const isCoolingDown = isRateLimited(i);
         const untilVal = rateLimitedUntil.get(i);
         const type = rateLimitType.get(i);
@@ -458,10 +442,7 @@ export default function (pi: ExtensionAPI) {
 
       const autoStatus = enabled ? "ON" : "OFF";
       const guard429Status = rotateOn429 ? "ON" : "OFF";
-      ctx.ui.notify(
-        `Auto-rotate: ${autoStatus} | 429-guard: ${guard429Status}\n${lines}`,
-        "info",
-      );
+      ctx.ui.notify(`Auto-rotate: ${autoStatus} | 429-guard: ${guard429Status}\n${lines}`, "info");
     },
   });
 
@@ -492,11 +473,7 @@ export default function (pi: ExtensionAPI) {
 
     const poolList = MODEL_POOL.map((m, i) => {
       const marker =
-        ctx.model &&
-        ctx.model.provider === m.provider &&
-        ctx.model.id === m.id
-          ? " ← current"
-          : "";
+        ctx.model && ctx.model.provider === m.provider && ctx.model.id === m.id ? " ← current" : "";
       return `  ${i + 1}. ${m.provider}/${m.id}${marker}`;
     }).join("\n");
 

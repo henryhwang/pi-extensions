@@ -19,11 +19,11 @@
  * restarts without needing env vars or re-entering them each session.
  */
 
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -74,7 +74,7 @@ let runtimeKeys: { tavily?: string; exa?: string; serper?: string } = {};
 let persistedKeys: { tavily?: string; exa?: string; serper?: string } = {};
 
 /** Runtime provider priority override. */
-let runtimePriority: ProviderId[] | undefined = undefined;
+let runtimePriority: ProviderId[] | undefined;
 
 /** Load web-search keys from pi's auth.json. */
 async function loadAuthKeys(): Promise<void> {
@@ -105,7 +105,10 @@ async function saveAuthKey(service: ProviderId, key: string): Promise<void> {
       // file doesn't exist yet
     }
 
-    const webSearch = (auth["web-search"] as Record<string, unknown>) ?? { type: "api_key", keys: {} };
+    const webSearch = (auth["web-search"] as Record<string, unknown>) ?? {
+      type: "api_key",
+      keys: {},
+    };
     webSearch.type = "api_key";
     const keys = (webSearch.keys as Record<string, string>) ?? {};
     keys[service] = key;
@@ -120,11 +123,17 @@ async function saveAuthKey(service: ProviderId, key: string): Promise<void> {
 
 function getKey(service: ProviderId): string | undefined {
   // Precedence: runtime (this session) > persisted (auth.json) > env var
-  return runtimeKeys[service] || persistedKeys[service] || process.env[{
-    tavily: "TAVILY_API_KEY",
-    exa: "EXA_API_KEY",
-    serper: "SERPER_API_KEY",
-  }[service]];
+  return (
+    runtimeKeys[service] ||
+    persistedKeys[service] ||
+    process.env[
+      {
+        tavily: "TAVILY_API_KEY",
+        exa: "EXA_API_KEY",
+        serper: "SERPER_API_KEY",
+      }[service]
+    ]
+  );
 }
 
 function getPriority(): ProviderId[] {
@@ -148,13 +157,11 @@ interface SearchOpts {
 async function fetchWithTimeout(
   url: string,
   options: RequestInit = {},
-  timeoutMs: number = 15000
+  timeoutMs: number = 15000,
 ): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => {
-    controller.abort(
-      new DOMException(`Request timed out after ${timeoutMs}ms`, "TimeoutError")
-    )
+    controller.abort(new DOMException(`Request timed out after ${timeoutMs}ms`, "TimeoutError"));
   }, timeoutMs);
 
   try {
@@ -171,10 +178,7 @@ async function fetchWithTimeout(
   }
 }
 
-async function searchTavily(
-  query: string,
-  options: SearchOpts = {}
-): Promise<SearchOutput> {
+async function searchTavily(query: string, options: SearchOpts = {}): Promise<SearchOutput> {
   const apiKey = getKey("tavily");
   if (!apiKey) throw new Error("Tavily not configured. Set TAVILY_API_KEY or /web-search-config");
 
@@ -198,14 +202,12 @@ async function searchTavily(
       body: JSON.stringify(body),
       signal: options.signal,
     },
-    20000
+    20000,
   );
 
   if (!res.ok) {
     const errText = await res.text();
-    const preview = errText
-      .slice(0, 200)
-      .replace(/\b[A-Za-z0-9_\-]{20,}\b/g, "[REDACTED]");
+    const preview = errText.slice(0, 200).replace(/\b[A-Za-z0-9_-]{20,}\b/g, "[REDACTED]");
     throw new Error(`Tavily HTTP ${res.status}: ${preview}`);
   }
 
@@ -223,10 +225,7 @@ async function searchTavily(
   };
 }
 
-async function searchExa(
-  query: string,
-  options: SearchOpts = {}
-): Promise<SearchOutput> {
+async function searchExa(query: string, options: SearchOpts = {}): Promise<SearchOutput> {
   const apiKey = getKey("exa");
   if (!apiKey) throw new Error("Exa not configured. Set EXA_API_KEY or /web-search-config");
 
@@ -235,28 +234,30 @@ async function searchExa(
     numResults: Math.min(options.maxResults ?? MAX_RESULTS, MAX_RESULTS),
     type: "auto",
     contents: {
-      text: true,       // full page text (first 10 free)
+      text: true, // full page text (first 10 free)
       highlights: true, // key sentence excerpts
     },
   };
   if (options.includeDomains?.length) body.includeDomains = options.includeDomains;
   if (options.excludeDomains?.length) body.excludeDomains = options.excludeDomains;
 
-  const res = await fetchWithTimeout(EXA_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
+  const res = await fetchWithTimeout(
+    EXA_URL,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+      },
+      body: JSON.stringify(body),
+      signal: options.signal,
     },
-    body: JSON.stringify(body),
-    signal: options.signal
-  }, 20000);
+    20000,
+  );
 
   if (!res.ok) {
     const errText = await res.text();
-    const preview = errText
-      .slice(0, 200)
-      .replace(/\b[A-Za-z0-9_\-]{20,}\b/g, "[REDACTED]");
+    const preview = errText.slice(0, 200).replace(/\b[A-Za-z0-9_-]{20,}\b/g, "[REDACTED]");
     throw new Error(`Exa HTTP ${res.status}: ${preview}`);
   }
 
@@ -267,8 +268,8 @@ async function searchExa(
       title: r.title || "",
       url: r.url || "",
       snippet:
-        r.highlight?.join(" ... ") ||  // Exa highlights
-        r.text?.slice(0, 300) ||       // fallback to text excerpt
+        r.highlight?.join(" ... ") || // Exa highlights
+        r.text?.slice(0, 300) || // fallback to text excerpt
         "",
       score: r.score,
       publishedDate: r.publishedDate || undefined,
@@ -278,28 +279,30 @@ async function searchExa(
   };
 }
 
-async function searchSerper(
-  query: string,
-  options: SearchOpts = {}
-): Promise<SearchOutput> {
+async function searchSerper(query: string, options: SearchOpts = {}): Promise<SearchOutput> {
   const apiKey = getKey("serper");
   if (!apiKey) throw new Error("Serper not configured. Set SERPER_API_KEY or /web-search-config");
 
-  const res = await fetchWithTimeout(SERPER_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-API-KEY": apiKey,
+  const res = await fetchWithTimeout(
+    SERPER_URL,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-KEY": apiKey,
+      },
+      body: JSON.stringify({
+        q: query,
+        num: Math.min(options.maxResults ?? MAX_RESULTS, MAX_RESULTS),
+      }),
+      signal: options.signal,
     },
-    body: JSON.stringify({ q: query, num: Math.min(options.maxResults ?? MAX_RESULTS, MAX_RESULTS) }),
-    signal: options.signal
-  }, 20000);
+    20000,
+  );
 
   if (!res.ok) {
     const errText = await res.text();
-    const preview = errText
-      .slice(0, 200)
-      .replace(/\b[A-Za-z0-9_\-]{20,}\b/g, "[REDACTED]");
+    const preview = errText.slice(0, 200).replace(/\b[A-Za-z0-9_-]{20,}\b/g, "[REDACTED]");
     throw new Error(`Serper HTTP ${res.status}: ${preview}`);
   }
 
@@ -342,7 +345,7 @@ const SEARCH_FN: Record<ProviderId, (query: string, opts: SearchOpts) => Promise
 
 async function searchWithFallback(
   query: string,
-  opts: SearchOpts = {}
+  opts: SearchOpts = {},
 ): Promise<{ output: SearchOutput | null; lastError: string | null }> {
   const maxResults = opts.maxResults ?? 5;
   const priority = getPriority();
@@ -355,7 +358,7 @@ async function searchWithFallback(
       const output = await SEARCH_FN[provider](query, { ...opts, maxResults });
       return { output, lastError: null };
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err)
+      const msg = err instanceof Error ? err.message : String(err);
       lastError = `${provider}: ${msg}`;
     }
   }
@@ -388,9 +391,7 @@ function formatOutput(output: SearchOutput): string {
     const scoreStr = r.score != null ? ` [relevance: ${r.score.toFixed(2)}]` : "";
     const dateStr = r.publishedDate ? ` [${r.publishedDate}]` : "";
     const authorStr = r.author ? ` by ${r.author}` : "";
-    const snippet = r.snippet.length > 400
-      ? r.snippet.slice(0, 400) + "..."
-      : r.snippet;
+    const snippet = r.snippet.length > 400 ? `${r.snippet.slice(0, 400)}...` : r.snippet;
     lines.push(`${i + 1}. ${r.title}${scoreStr}${dateStr}${authorStr}`);
     lines.push(`   ${r.url}`);
     lines.push(`   ${snippet}`);
@@ -413,10 +414,7 @@ const SearchParams = Type.Object({
     }),
   ),
   search_depth: Type.Optional(
-    Type.Union([
-      Type.Literal("basic"),
-      Type.Literal("advanced"),
-    ] as const, {
+    Type.Union([Type.Literal("basic"), Type.Literal("advanced")] as const, {
       description:
         "Search depth. 'basic' is fast (snippets only). 'advanced' fetches full page content and returns an AI summary. Tavily only; Exa and Serper always return full snippets.",
       default: "basic",
@@ -430,8 +428,7 @@ const SearchParams = Type.Object({
   ),
   exclude_domains: Type.Optional(
     Type.Array(Type.String(), {
-      description:
-        "Exclude these domains. Only supported by Exa; ignored by Tavily and Serper.",
+      description: "Exclude these domains. Only supported by Exa; ignored by Tavily and Serper.",
     }),
   ),
 });
@@ -453,7 +450,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
       "- Latest documentation, GitHub issues, and error messages",
       "- API references and library usage",
       "- Best practices and design patterns",
-      "- Technical research and troubleshooting"
+      "- Technical research and troubleshooting",
     ].join("\n"),
     parameters: SearchParams,
 
@@ -480,7 +477,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
       }
 
       // No provider succeeded — check if any keys exist at all
-      const hasAnyKey = getPriority().some(p => getKey(p));
+      const hasAnyKey = getPriority().some((p) => getKey(p));
       if (!hasAnyKey) {
         return {
           content: [
@@ -519,20 +516,14 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 
       let text =
         theme.fg("toolTitle", theme.bold("web_search ")) +
-        theme.fg("accent", query.length > 60
-          ? query.slice(0, 60) + "..."
-          : query) +
+        theme.fg("accent", query.length > 60 ? `${query.slice(0, 60)}...` : query) +
         theme.fg("muted", ` [${depth}, ${maxResults} results]`);
 
       if (domains?.length) {
-        text +=
-          "\n  " +
-          theme.fg("dim", `domains: ${domains.join(", ")}`);
+        text += `\n  ${theme.fg("dim", `domains: ${domains.join(", ")}`)}`;
       }
       if (excludeDomains?.length) {
-        text +=
-          "\n  " +
-          theme.fg("dim", `exclude: ${excludeDomains.join(", ")}`);
+        text += `\n  ${theme.fg("dim", `exclude: ${excludeDomains.join(", ")}`)}`;
       }
 
       return new Text(text, 0, 0);
@@ -542,11 +533,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
       const details = result.details as SearchOutput | null;
       if (!details) {
         const firstContent = result.content[0];
-        return new Text(
-          firstContent?.type === "text" ? firstContent.text : "(no results)",
-          0,
-          0,
-        );
+        return new Text(firstContent?.type === "text" ? firstContent.text : "(no results)", 0, 0);
       }
 
       const lines: string[] = [];
@@ -566,27 +553,20 @@ export default function webSearchExtension(pi: ExtensionAPI) {
       const show = details.results.slice(0, 5);
       for (let i = 0; i < show.length; i++) {
         const r = show[i];
-        const scoreStr =
-          r.score != null ? ` ${theme.fg("dim", `[${r.score.toFixed(2)}]`)}` : "";
+        const scoreStr = r.score != null ? ` ${theme.fg("dim", `[${r.score.toFixed(2)}]`)}` : "";
         const dateStr = r.publishedDate ? ` ${theme.fg("dim", `[${r.publishedDate}]`)}` : "";
         const authorStr = r.author ? ` ${theme.fg("dim", `by ${r.author}`)}` : "";
         lines.push("");
         lines.push(
           `${theme.fg("muted", `${i + 1}.`)} ${theme.fg("accent", r.title)}${scoreStr}${dateStr}${authorStr}`,
         );
-        lines.push("  " + theme.fg("dim", r.url));
-        const snippet =
-          r.snippet.length > 180
-            ? r.snippet.slice(0, 180) + "..."
-            : r.snippet;
-        lines.push("  " + theme.fg("toolOutput", snippet));
+        lines.push(`  ${theme.fg("dim", r.url)}`);
+        const snippet = r.snippet.length > 180 ? `${r.snippet.slice(0, 180)}...` : r.snippet;
+        lines.push(`  ${theme.fg("toolOutput", snippet)}`);
       }
 
       if (details.results.length > 5) {
-        lines.push(
-          "",
-          theme.fg("muted", `  +${details.results.length - 5} more results`),
-        );
+        lines.push("", theme.fg("muted", `  +${details.results.length - 5} more results`));
       }
 
       return new Text(lines.join("\n"), 0, 0);
@@ -609,17 +589,18 @@ export default function webSearchExtension(pi: ExtensionAPI) {
         const tKey = getKey("tavily");
         const eKey = getKey("exa");
         const sKey = getKey("serper");
-        const mask = (k: string) => k.length > 12 ? `✓ ${k.slice(0, 4)}...${k.slice(-4)}` : "✓ set";
+        const mask = (k: string) =>
+          k.length > 12 ? `✓ ${k.slice(0, 4)}...${k.slice(-4)}` : "✓ set";
         const priority = getPriority();
         ctx.ui.notify(
           `Web search config:\n` +
-          `  Tavily:  ${tKey ? mask(tKey) : "✗ not set"}\n` +
-          `  Exa:     ${eKey ? mask(eKey) : "✗ not set"}\n` +
-          `  Serper:  ${sKey ? mask(sKey) : "✗ not set"}\n` +
-          `  Priority: ${priority.join(" → ")}\n\n` +
-          `Usage:\n` +
-          `  /web-search-config <tavily|exa|serper> <key>\n` +
-          `  /web-search-config priority <tavily,exa,serper>`,
+            `  Tavily:  ${tKey ? mask(tKey) : "✗ not set"}\n` +
+            `  Exa:     ${eKey ? mask(eKey) : "✗ not set"}\n` +
+            `  Serper:  ${sKey ? mask(sKey) : "✗ not set"}\n` +
+            `  Priority: ${priority.join(" → ")}\n\n` +
+            `Usage:\n` +
+            `  /web-search-config <tavily|exa|serper> <key>\n` +
+            `  /web-search-config priority <tavily,exa,serper>`,
           "info",
         );
         return;
@@ -630,10 +611,13 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 
       // Priority override
       if (target === "priority") {
-        const order = parts[1].split(",").map(s => s.trim().toLowerCase()) as ProviderId[];
-        const invalid = order.filter(p => !VALID_PROVIDERS.includes(p));
+        const order = parts[1].split(",").map((s) => s.trim().toLowerCase()) as ProviderId[];
+        const invalid = order.filter((p) => !VALID_PROVIDERS.includes(p));
         if (invalid.length) {
-          ctx.ui.notify(`Invalid providers: ${invalid.join(", ")}. Valid: tavily, exa, serper`, "error");
+          ctx.ui.notify(
+            `Invalid providers: ${invalid.join(", ")}. Valid: tavily, exa, serper`,
+            "error",
+          );
           return;
         }
         runtimePriority = order;
@@ -660,10 +644,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
       }
 
       const masked = key.length > 12 ? `${key.slice(0, 4)}...${key.slice(-4)}` : "***";
-      ctx.ui.notify(
-        `${target} key set: ${masked} (persisted in auth.json)`,
-        "info",
-      );
+      ctx.ui.notify(`${target} key set: ${masked} (persisted in auth.json)`, "info");
     },
   });
 

@@ -23,11 +23,19 @@ interface ModelStats {
   totalTokens: number;
 }
 
-const ZERO: ModelStats = { count: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
+const ZERO: ModelStats = {
+  count: 0,
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 0,
+};
 
-export default function(pi: ExtensionAPI) {
+export default function (pi: ExtensionAPI) {
   pi.registerCommand("requests", {
-    description: "Show LLM API request count and per-model breakdown for the current session branch",
+    description:
+      "Show LLM API request count and per-model breakdown for the current session branch",
     handler: async (_args, ctx) => {
       const branch = ctx.sessionManager.getBranch();
       const byModel = new Map<string, ModelStats>();
@@ -66,7 +74,9 @@ export default function(pi: ExtensionAPI) {
       }
 
       const lines: string[] = [];
-      lines.push(`Messages: ${userTotal} user, ${assistantTotal} assistant, ${toolTotal} tool results`);
+      lines.push(
+        `Messages: ${userTotal} user, ${assistantTotal} assistant, ${toolTotal} tool results`,
+      );
       lines.push("");
 
       if (assistantTotal === 0) {
@@ -80,20 +90,27 @@ export default function(pi: ExtensionAPI) {
         }
         lines.push("");
 
-        const totals = models.reduce((acc, [, m]) => ({
-          input: acc.input + m.input,
-          output: acc.output + m.output,
-          cacheRead: acc.cacheRead + m.cacheRead,
-          cacheWrite: acc.cacheWrite + m.cacheWrite,
-          totalTokens: acc.totalTokens + m.totalTokens,
-          count: 0,
-        }), { ...ZERO });
+        const totals = models.reduce(
+          (acc, [, m]) => ({
+            input: acc.input + m.input,
+            output: acc.output + m.output,
+            cacheRead: acc.cacheRead + m.cacheRead,
+            cacheWrite: acc.cacheWrite + m.cacheWrite,
+            totalTokens: acc.totalTokens + m.totalTokens,
+            count: 0,
+          }),
+          { ...ZERO },
+        );
 
         lines.push("## Tokens");
-        lines.push(`Total: ${formatK(totals.totalTokens)} (in: ${formatK(totals.input)} / out: ${formatK(totals.output)} / cache\u00A0read: ${formatK(totals.cacheRead)} / cache\u00A0write: ${formatK(totals.cacheWrite)})`);
+        lines.push(
+          `Total: ${formatK(totals.totalTokens)} (in: ${formatK(totals.input)} / out: ${formatK(totals.output)} / cache\u00A0read: ${formatK(totals.cacheRead)} / cache\u00A0write: ${formatK(totals.cacheWrite)})`,
+        );
         lines.push("");
         for (const [model, m] of models) {
-          lines.push(`  ${model}: ${formatK(m.totalTokens)} (in: ${formatK(m.input)} / out: ${formatK(m.output)} / cache\u00A0read: ${formatK(m.cacheRead)} / cache\u00A0write: ${formatK(m.cacheWrite)})`);
+          lines.push(
+            `  ${model}: ${formatK(m.totalTokens)} (in: ${formatK(m.input)} / out: ${formatK(m.output)} / cache\u00A0read: ${formatK(m.cacheRead)} / cache\u00A0write: ${formatK(m.cacheWrite)})`,
+          );
         }
         lines.push("");
         lines.push("Each assistant message = 1 API call to the LLM provider.");

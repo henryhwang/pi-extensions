@@ -9,11 +9,6 @@
     "skipLibCheck": true,
     "rootDir": "."
   },
-  "include": [
-    "extensions/**/*.ts"
-  ],
-  "exclude": [
-    "node_modules",
-    ".pi"
-  ]
+  "include": ["extensions/**/*.ts"],
+  "exclude": ["node_modules", ".pi"]
 }
