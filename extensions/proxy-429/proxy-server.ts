@@ -262,7 +262,7 @@ function startProxy(port: number) {
     }
   });
 
-  server.listen(port, () => {
+  server.listen(port, "127.0.0.1", () => {
     console.log(`[429-fix] Proxying ${TARGET} → http://localhost:${port}`);
     sendToParent({ type: "started", port });
   });
