@@ -96,6 +96,19 @@ const MAX_FETCH_SIZE = 5 * 1024 * 1024;
  */
 let proxyUrl = process.env.WEB_FETCH_PROXY_URL ?? "";
 
+/** Check whether a proxy-fetch worker is reachable at the given URL. */
+async function checkProxyHealth(url: string): Promise<boolean> {
+  try {
+    const healthUrl = new URL("/health", url).href;
+    const res = await fetchWithTimeout(healthUrl, {}, 5000);
+    if (res.status !== 200) return false;
+    const body = await res.text();
+    return body.includes('"ok"');
+  } catch {
+    return false;
+  }
+}
+
 /** URLs matching this pattern are already absolute or non-HTTP — skip resolution. */
 const SKIP_URL_PATTERN = /^(https?:\/\/|data:|mailto:|tel:|#|javascript:)/i;
 
@@ -725,18 +738,32 @@ export default function (pi: ExtensionAPI) {
       if (arg === "off" || arg === "disable") {
         proxyUrl = "";
         ctx.ui.notify("Proxy-fetch disabled", "info");
-        ctx.ui.setStatus("proxy-fetch", "off");
+        ctx.ui.setStatus("proxy-fetch", null);
         return;
       }
 
       if (arg === "default" || arg === "reset") {
         // Reset to the env var value (may be empty = disabled)
-        proxyUrl = process.env.WEB_FETCH_PROXY_URL ?? "";
-        const msg = proxyUrl
-          ? `Proxy-fetch reset to: ${shortenProxyUrl(proxyUrl)}`
-          : "Proxy-fetch reset: no URL configured (disabled)";
-        ctx.ui.notify(msg, "info");
-        ctx.ui.setStatus("proxy-fetch", proxyUrl ? shortenProxyUrl(proxyUrl) : "off");
+        const envUrl = process.env.WEB_FETCH_PROXY_URL ?? "";
+        if (envUrl) {
+          ctx.ui.notify(`Checking ${shortenProxyUrl(envUrl)}/health ...`, "info");
+          if (!(await checkProxyHealth(envUrl))) {
+            ctx.ui.notify(
+              `Health check failed: could not reach ${shortenProxyUrl(envUrl)}/health`,
+              "error",
+            );
+            proxyUrl = "";
+            ctx.ui.setStatus("proxy-fetch", null);
+            return;
+          }
+          proxyUrl = envUrl;
+          ctx.ui.notify(`Proxy-fetch reset to: ${shortenProxyUrl(proxyUrl)} ✓`, "info");
+          ctx.ui.setStatus("proxy-fetch", shortenProxyUrl(proxyUrl));
+        } else {
+          proxyUrl = "";
+          ctx.ui.notify("Proxy-fetch reset: no URL configured (disabled)", "info");
+          ctx.ui.setStatus("proxy-fetch", null);
+        }
         return;
       }
 
@@ -747,8 +774,19 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.notify("Proxy URL must use http or https", "error");
           return;
         }
+
+        // Health check: verify the proxy is reachable and responds correctly
+        ctx.ui.notify(`Checking ${shortenProxyUrl(u.href)}/health ...`, "info");
+        if (!(await checkProxyHealth(u.href))) {
+          ctx.ui.notify(
+            `Health check failed: could not reach ${shortenProxyUrl(u.href)}/health`,
+            "error",
+          );
+          return;
+        }
+
         proxyUrl = u.href;
-        ctx.ui.notify(`Proxy-fetch set to: ${shortenProxyUrl(proxyUrl)}`, "info");
+        ctx.ui.notify(`Proxy-fetch set to: ${shortenProxyUrl(proxyUrl)} ✓`, "info");
         ctx.ui.setStatus("proxy-fetch", shortenProxyUrl(proxyUrl));
       } catch {
         ctx.ui.notify(
@@ -759,9 +797,17 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // Show proxy status on session start (only if configured)
-  pi.on("session_start", (_event, ctx) => {
+  // Show proxy status on session start (only if configured and healthy)
+  pi.on("session_start", async (_event, ctx) => {
     if (proxyUrl) {
+      if (!(await checkProxyHealth(proxyUrl))) {
+        proxyUrl = "";
+        ctx.ui.notify(
+          `Proxy-fetch disabled: ${shortenProxyUrl(proxyUrl)}/health unreachable`,
+          "warning",
+        );
+        return;
+      }
       ctx.ui.setStatus("proxy-fetch", shortenProxyUrl(proxyUrl));
     }
   });
