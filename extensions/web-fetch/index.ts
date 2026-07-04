@@ -9,8 +9,15 @@
  * - readerMode: use @mozilla/readability to extract main article content (default: false)
  *
  * Features:
+ * - Proxy fallback: retries through a proxy-fetch worker when the direct fetch
+ *   is blocked (403/451/network error/timeout). Disabled by default — enable via
+ *   the WEB_FETCH_PROXY_URL env var or /proxy-fetch slash command.
+ * - Relative link resolution: resolves relative URLs (href/src/action) in the
+ *   DOM against the page's final URL before markdown conversion, so links like
+ *   /docs/api become https://example.com/docs/api.
  * - Streaming fetch with hard 5MB raw response limit
  * - SSRF protection (blocks localhost, private/link-local IPs, non-HTTP protocols)
+ *   — applied to both the initial URL and the final URL after redirects/proxy
  * - Binary content detection and blocking
  * - URL sanitization (strips wrapping quotes, @-prefixes, trailing junk)
  * - Optional reader mode via @mozilla/readability for article extraction
@@ -47,15 +54,52 @@ interface FetchOutput {
   outputBytes: number;
   format: "markdown" | "text";
   readerMode: boolean;
+  viaProxy: boolean;
   tempFile?: string;
+}
+
+interface FetchedBody {
+  body: string;
+  contentType: string;
+  baseUrl: string; // final URL after redirects (for relative link resolution)
+}
+
+/** HTTP error carrying the status code, so retry logic can decide. */
+class HttpError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "HttpError";
+    this.status = status;
+  }
+}
+
+/** Errors that should never trigger a proxy retry (SSRF, binary, too large, etc.) */
+class NonRetryableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NonRetryableError";
+  }
 }
 
 // ── Constants ──────────────────────────────────────────────────
 const MAX_FETCH_SIZE = 5 * 1024 * 1024;
 
-// ── Helpers ────────────────────────────────────────────────────
+/**
+ * Proxy URL for fallback fetching when the direct fetch is blocked.
+ *
+ * Empty by default — no proxy fallback. Enable by:
+ *   - Setting the WEB_FETCH_PROXY_URL env var before starting pi
+ *   - Running /proxy-fetch <url> during a session
+ *
+ * Can be changed at runtime via the /proxy-fetch slash command.
+ */
+let proxyUrl = process.env.WEB_FETCH_PROXY_URL ?? "";
 
-// ── HTTP with timeout ──────────────────────────────────────────
+/** URLs matching this pattern are already absolute or non-HTTP — skip resolution. */
+const SKIP_URL_PATTERN = /^(https?:\/\/|data:|mailto:|tel:|#|javascript:)/i;
+
+// ── HTTP helpers ───────────────────────────────────────────────
 
 async function fetchWithTimeout(
   url: string,
@@ -80,6 +124,43 @@ async function fetchWithTimeout(
     clearTimeout(timeoutId);
   }
 }
+
+/** Build a proxy-fetch URL for the given target. */
+function buildProxyFetchUrl(targetUrl: string): string {
+  const u = new URL(proxyUrl);
+  u.searchParams.set("url", targetUrl);
+  return u.href;
+}
+
+/**
+ * Whether a failed direct fetch should be retried through the proxy.
+ *
+ * Retries on: 403 (forbidden/firewall), 451 (legal/geo-block), and network
+ * errors / timeouts (any thrown error that isn't a NonRetryableError or
+ * non-blocking HttpError).
+ */
+function shouldRetryViaProxy(err: unknown): boolean {
+  if (err instanceof NonRetryableError) return false;
+  if (err instanceof HttpError) {
+    return err.status === 403 || err.status === 451;
+  }
+  // Network errors (TypeError from fetch), timeouts (AbortError/TimeoutError),
+  // and any other unexpected thrown error — retry as a best-effort fallback.
+  return true;
+}
+
+/** Shorten a proxy URL for display in status widgets and notifications. */
+function shortenProxyUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.length > 24 ? `${u.hostname.slice(0, 24)}...` : u.hostname;
+    return `${u.protocol}//${host}`;
+  } catch {
+    return url.length > 30 ? `${url.slice(0, 30)}...` : url;
+  }
+}
+
+// ── URL / content-type helpers ─────────────────────────────────
 
 function cleanUrl(url: string): string {
   return url.trim().replace(/^[@\s"'`<>]+|[\s"'`<>]+$/g, "");
@@ -144,12 +225,124 @@ function getCharset(contentType: string): string | undefined {
     .toLowerCase();
 }
 
+// ── Body reading ───────────────────────────────────────────────
+
+/** Stream-read the response body with a hard size limit and charset decoding. */
+async function readResponseBody(res: Response, contentType: string): Promise<string> {
+  const reader = res.body?.getReader();
+  if (!reader) throw new NonRetryableError("Response body is not readable");
+
+  let bodyText = "";
+  let rawBytes = 0;
+
+  let decoder: TextDecoder;
+  try {
+    decoder = new TextDecoder(getCharset(contentType) || "utf-8");
+  } catch {
+    decoder = new TextDecoder("utf-8");
+  }
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      if (value) {
+        rawBytes += value.byteLength;
+        if (rawBytes > MAX_FETCH_SIZE) {
+          await reader.cancel().catch(() => {});
+          throw new NonRetryableError(
+            `Response too large (exceeded ${formatSize(MAX_FETCH_SIZE)})`,
+          );
+        }
+        bodyText += decoder.decode(value, { stream: true });
+      }
+    }
+    // Flush any remaining bytes from the decoder
+    bodyText += decoder.decode();
+  } finally {
+    reader.releaseLock();
+  }
+
+  return bodyText;
+}
+
+// ── Core fetch (direct or via proxy) ───────────────────────────
+
+const FETCH_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (compatible; PiWebFetch/1.0)",
+  Accept: "text/html,application/xhtml+xml,text/plain,application/json,*/*",
+};
+
+/**
+ * Fetch a URL and read its body. Works for both direct and proxied fetches.
+ *
+ * For proxied fetches, the final URL (after redirects) comes from the
+ * X-Final-URL response header that the proxy-fetch worker sets.
+ * For direct fetches, res.url gives the final URL.
+ */
+async function fetchAndReadBody(
+  url: string,
+  signal: AbortSignal | undefined,
+  useProxy: boolean,
+): Promise<FetchedBody> {
+  const fetchUrl = useProxy ? buildProxyFetchUrl(url) : url;
+
+  const res = await fetchWithTimeout(fetchUrl, { signal, headers: FETCH_HEADERS }, 20000);
+
+  // Extract final URL: proxy returns X-Final-URL header, direct fetch uses res.url
+  const baseUrl = res.headers.get("X-Final-URL") || res.url;
+
+  // Defense-in-depth: verify the final URL after redirects
+  const finalSafety = isSafeUrl(baseUrl);
+  if (!finalSafety.safe) {
+    throw new NonRetryableError(`Redirected to blocked URL: ${finalSafety.error}`);
+  }
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new HttpError(`HTTP ${res.status} from ${baseUrl}: ${redactError(errText)}`, res.status);
+  }
+
+  const contentType = res.headers.get("content-type") || "text/plain";
+
+  // Early content-type check before streaming the body
+  if (isBinaryContent(contentType)) {
+    throw new NonRetryableError(
+      `Binary content detected (${contentType}). This tool only supports text/HTML/JSON.`,
+    );
+  }
+
+  const body = await readResponseBody(res, contentType);
+  return { body, contentType, baseUrl };
+}
+
 // ── Content Processing ─────────────────────────────────────────
 const turndownService = new TurndownService({
   headingStyle: "atx",
   codeBlockStyle: "fenced",
   bulletListMarker: "-",
 });
+
+/**
+ * Resolve relative URLs (href, src, action) in the DOM against baseUrl.
+ *
+ * Turndown has no baseUrl option, so relative links like /docs/api would
+ * become broken markdown links. This fixes them in the DOM before conversion.
+ */
+function resolveRelativeUrls(doc: Document, baseUrl: string): void {
+  for (const el of doc.querySelectorAll("[href], [src], [action]")) {
+    for (const attr of ["href", "src", "action"] as const) {
+      const val = el.getAttribute(attr);
+      if (!val || SKIP_URL_PATTERN.test(val)) continue;
+      try {
+        el.setAttribute(attr, new URL(val, baseUrl).href);
+      } catch {
+        // Ignore malformed URLs
+      }
+    }
+  }
+}
 
 function cleanHtml(html: string): Document {
   const { document } = parseHTML(html);
@@ -218,6 +411,7 @@ async function processHtml(
   html: string,
   format: "markdown" | "text",
   readerMode: boolean = false,
+  baseUrl?: string,
 ): Promise<string> {
   // Create the fallback document FIRST (before Readability mutates it)
   const document = cleanHtml(html);
@@ -279,6 +473,12 @@ async function processHtml(
   }
 
   try {
+    // Resolve relative URLs against the page's base URL before conversion.
+    // Applied to targetDoc so it covers both the fallback and reader-mode paths.
+    if (baseUrl) {
+      resolveRelativeUrls(targetDoc, baseUrl);
+    }
+
     let result: string;
     if (format === "markdown") {
       result = turndownService.turndown(targetDoc.body || targetDoc.documentElement);
@@ -316,81 +516,40 @@ async function fetchUrl(
 
   const safety = isSafeUrl(normalizedUrl);
   if (!safety.safe) {
-    throw new Error(`URL rejected: ${safety.error}`);
+    throw new NonRetryableError(`URL rejected: ${safety.error}`);
   }
 
-  const res = await fetchWithTimeout(
-    normalizedUrl,
-    {
-      signal,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; PiWebFetch/1.0)",
-        Accept: "text/html,application/xhtml+xml,text/plain,application/json,*/*",
-      },
-    },
-    20000,
-  );
-
-  // Defense-in-depth: verify the final URL after redirects
-  const finalSafety = isSafeUrl(res.url);
-  if (!finalSafety.safe) {
-    throw new Error(`Redirected to blocked URL: ${finalSafety.error}`);
-  }
-
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`HTTP ${res.status} from ${res.url}: ${redactError(errText)}`);
-  }
-
-  const contentType = res.headers.get("content-type") || "text/plain";
-
-  // Early content-type check before streaming the body
-  if (isBinaryContent(contentType)) {
-    throw new Error(
-      `Binary content detected (${contentType}). This tool only supports text/HTML/JSON.`,
-    );
-  }
-
-  // Streaming read with size limit
-  const reader = res.body?.getReader();
-  if (!reader) throw new Error("Response body is not readable");
-
-  let bodyText = "";
-  let rawBytes = 0;
-
-  let decoder: TextDecoder;
-  try {
-    decoder = new TextDecoder(getCharset(contentType) || "utf-8");
-  } catch {
-    decoder = new TextDecoder("utf-8");
-  }
+  // Try direct fetch first, fall back to proxy on blocking errors
+  // (403/451/firewall blocks, network errors, timeouts)
+  let fetched: FetchedBody;
+  let viaProxy = false;
 
   try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      if (value) {
-        rawBytes += value.byteLength;
-        if (rawBytes > MAX_FETCH_SIZE) {
-          await reader.cancel().catch(() => {});
-          throw new Error(`Response too large (exceeded ${formatSize(MAX_FETCH_SIZE)})`);
-        }
-        bodyText += decoder.decode(value, { stream: true });
-      }
+    fetched = await fetchAndReadBody(normalizedUrl, signal, false);
+  } catch (directErr) {
+    if (!proxyUrl || !shouldRetryViaProxy(directErr)) {
+      throw directErr;
     }
-    // Flush any remaining bytes from the decoder
-    bodyText += decoder.decode();
-  } finally {
-    reader.releaseLock();
+    // Retry through proxy
+    try {
+      fetched = await fetchAndReadBody(normalizedUrl, signal, true);
+      viaProxy = true;
+    } catch (proxyErr) {
+      // Both direct and proxy failed — include both error messages for debugging
+      const directMsg = directErr instanceof Error ? directErr.message : String(directErr);
+      const proxyMsg = proxyErr instanceof Error ? proxyErr.message : String(proxyErr);
+      throw new Error(`Direct fetch failed: ${directMsg}\nProxy fetch also failed: ${proxyMsg}`);
+    }
   }
+
+  const { body: bodyText, contentType, baseUrl } = fetched;
 
   // Process content
   let content: string;
   if (contentType.includes("application/json")) {
     content = bodyText;
   } else if (contentType.includes("text/html") || contentType.includes("application/xhtml+xml")) {
-    content = await processHtml(bodyText, format, readerMode);
+    content = await processHtml(bodyText, format, readerMode, baseUrl);
   } else {
     content = bodyText;
   }
@@ -410,6 +569,7 @@ async function fetchUrl(
     outputBytes: truncation.outputBytes,
     format,
     readerMode,
+    viaProxy,
   };
 
   if (truncation.truncated) {
@@ -515,6 +675,9 @@ export default function (pi: ExtensionAPI) {
       if (details.format === "markdown" && typeLabel.includes("html")) {
         status += theme.fg("dim", " → markdown");
       }
+      if (details.viaProxy) {
+        status += theme.fg("dim", " via proxy");
+      }
       if (details.truncated) {
         status += theme.fg("warning", ` (truncated, full: ${details.tempFile})`);
       }
@@ -543,5 +706,63 @@ export default function (pi: ExtensionAPI) {
       } catch (_) {}
     }
     tempFiles.clear();
+  });
+
+  // ── Proxy-fetch command ────────────────────────────────────
+  pi.registerCommand("proxy-fetch", {
+    description: "Configure the proxy-fetch URL used as a fallback when direct fetches are blocked",
+    handler: async (args, ctx) => {
+      const arg = args?.trim();
+      if (!arg) {
+        // Show current status
+        const status = proxyUrl
+          ? `Proxy-fetch: ${shortenProxyUrl(proxyUrl)}`
+          : "Proxy-fetch: disabled (direct fetch only)";
+        ctx.ui.notify(status, "info");
+        return;
+      }
+
+      if (arg === "off" || arg === "disable") {
+        proxyUrl = "";
+        ctx.ui.notify("Proxy-fetch disabled", "info");
+        ctx.ui.setStatus("proxy-fetch", "off");
+        return;
+      }
+
+      if (arg === "default" || arg === "reset") {
+        // Reset to the env var value (may be empty = disabled)
+        proxyUrl = process.env.WEB_FETCH_PROXY_URL ?? "";
+        const msg = proxyUrl
+          ? `Proxy-fetch reset to: ${shortenProxyUrl(proxyUrl)}`
+          : "Proxy-fetch reset: no URL configured (disabled)";
+        ctx.ui.notify(msg, "info");
+        ctx.ui.setStatus("proxy-fetch", proxyUrl ? shortenProxyUrl(proxyUrl) : "off");
+        return;
+      }
+
+      // Try to parse as a URL
+      try {
+        const u = new URL(arg);
+        if (u.protocol !== "http:" && u.protocol !== "https:") {
+          ctx.ui.notify("Proxy URL must use http or https", "error");
+          return;
+        }
+        proxyUrl = u.href;
+        ctx.ui.notify(`Proxy-fetch set to: ${shortenProxyUrl(proxyUrl)}`, "info");
+        ctx.ui.setStatus("proxy-fetch", shortenProxyUrl(proxyUrl));
+      } catch {
+        ctx.ui.notify(
+          "Invalid URL. Use: /proxy-fetch <url> | off | default | <no args for status>",
+          "error",
+        );
+      }
+    },
+  });
+
+  // Show proxy status on session start (only if configured)
+  pi.on("session_start", (_event, ctx) => {
+    if (proxyUrl) {
+      ctx.ui.setStatus("proxy-fetch", shortenProxyUrl(proxyUrl));
+    }
   });
 }

@@ -6,7 +6,7 @@ Overrides pi's built-in `edit` tool with improved error messages, fuzzy matching
 
 | Issue | Built-in | Enhanced |
 |-------|----------|----------|
-| **File corruption on fuzzy match** | Normalizes **entire file** to fuzzy space; smart quotes/dashes on unrelated lines silently converted to ASCII | Maps fuzzy positions back to original content; only the matched region is replaced |
+| **File corruption on fuzzy match** | Uses NFKC normalization which can expand characters (`ﬁ`→`fi`); affected lines get corrupted | Uses only 1:1 transforms; maps fuzzy positions back to original content; only the matched region is replaced |
 | **Tab fuzzy matching** | Cannot match tabs vs spaces | Normalizes `\t` → 2 spaces for matching |
 | **Error on not-found** | `Could not find edits[1]` | Shows exact `oldText`, length, line count, first line |
 | **File context** | None | `>` markers with 3 lines of surrounding content |
@@ -17,20 +17,26 @@ Overrides pi's built-in `edit` tool with improved error messages, fuzzy matching
 
 ## Critical bug fixed: file corruption
 
-When the built-in's fuzzy matching fires (e.g. smart quotes, trailing whitespace), it normalizes the **entire file** to fuzzy space and writes that back. This silently converts smart quotes `""` → `""` and em-dashes `—` → `-` on every line, not just the edited one.
+When the built-in's fuzzy matching fires (e.g. smart quotes, trailing whitespace), it uses `text.normalize("NFKC")` which can expand single characters to multiple (e.g. ligatures `ﬁ` → `fi`). The built-in's `applyReplacementsPreservingUnchangedLines` then rewrites affected lines from the normalized content, corrupting those lines.
 
-Example:
+This extension fixes the corruption by:
+1. Not using NFKC normalization — only 1:1 character transforms (smart quotes, dashes, spaces)
+2. Mapping fuzzy match positions back to original content offsets
+3. Applying edits to the **original** content — unrelated bytes are untouched
 
-```
-Input:  Line 1 with "smart quotes"    ← \u201C/\u201D
-        Line 3 has — dash             ← \u2014
+## Features absorbed from built-in v0.80.3+
 
-After editing Line 2 (triggered fuzzy match via trailing whitespace):
-Output: Line 1 with "smart quotes"    ← now ASCII "
-        Line 3 has - dash             ← now ASCII -
-```
+The built-in has evolved; these features were absorbed to stay compatible:
 
-This extension fixes the corruption by mapping fuzzy match positions back to original content offsets, then applying edits to the **original** content. Unrelated lines are untouched.
+| Feature | Description |
+|---------|-------------|
+| **`renderShell: "self"`** | Tool renders its own shell (background/padding) instead of being wrapped in the default Box, avoiding double-boxing |
+| **`file_path` field support** | Handles models that send `file_path` instead of `path` — remapped in `prepareArguments` (goes beyond built-in, which only handles it in rendering) and used in all render functions |
+| **`resolveToCwd`** | Resolves paths with `~` expansion, Unicode space normalization, `@` prefix stripping, and `file://` URL handling (built-in's `resolveToCwd` is not exported, so reimplemented) |
+| **`renderToolPath`** | Path display shortened with `~` and clickable hyperlinks (OSC 8) when terminal supports it |
+| **Error deduplication** | `renderResult` skips error text if it's already shown in the call component's preview |
+| **Result diff fallback** | Shows result diff in the result body when no `callComponent` exists (e.g. session restore edge cases) |
+| **`setEditPreview`** | Proper change detection helper comparing error↔diff transitions, `diff`, and `firstChangedLine` |
 
 ## What's preserved (identical to built-in)
 

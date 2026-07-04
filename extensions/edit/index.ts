@@ -3,13 +3,23 @@
  *
  * Key improvements over built-in:
  *   1. Fixes built-in file corruption when fuzzy matching fires
- *      (built-in normalizes entire file, converting smart quotes/dashes on all lines;
- *       this version maps fuzzy positions back to original content, preserving unrelated lines)
+ *      (built-in uses NFKC normalization which can expand characters like ﬁ→fi;
+ *       this version uses only 1:1 transforms and maps fuzzy positions back to
+ *       original content, preserving unrelated bytes)
  *   2. Adds tab→spaces fuzzy matching (built-in cannot match tabs vs spaces)
  *   3. Shows failing oldText in error messages with nearby file context
  *   4. More descriptive, actionable error messages
  *   5. Custom renderCall/renderResult using enhanced matching for preview
  *      (avoids preview/execution divergence from inherited built-in renderer)
+ *
+ * Features absorbed from built-in v0.80.3+:
+ *   - renderShell: "self" for proper background/padding control
+ *   - file_path field support (rendering + prepareArguments remapping)
+ *   - resolveToCwd (~ expansion, Unicode space normalization, @ prefix)
+ *   - renderToolPath (path shortening with ~ + clickable hyperlinks)
+ *   - Error deduplication in renderResult (skip if already in preview)
+ *   - Result diff fallback when no callComponent exists
+ *   - setEditPreview change detection helper
  */
 
 import { constants } from "node:fs";
@@ -18,7 +28,9 @@ import {
   readFile as fsReadFile,
   writeFile as fsWriteFile,
 } from "node:fs/promises";
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
 import {
   type AgentToolResult,
@@ -29,7 +41,15 @@ import {
   type Theme,
   withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
-import { Box, type Component, Container, Spacer, Text } from "@earendil-works/pi-tui";
+import {
+  Box,
+  type Component,
+  Container,
+  getCapabilities,
+  hyperlink,
+  Spacer,
+  Text,
+} from "@earendil-works/pi-tui";
 import * as Diff from "diff";
 import type { Static } from "typebox";
 
@@ -58,6 +78,15 @@ const editSchema = Type.Object(
 );
 
 type EditInput = Static<typeof editSchema>;
+
+// Args as models might send them (file_path alias, legacy flat format)
+type RenderableEditArgs = {
+  path?: string;
+  file_path?: string;
+  edits?: Array<{ oldText: string; newText: string }>;
+  oldText?: string;
+  newText?: string;
+};
 
 // ── Result details (matches built-in EditToolDetails contract) ─
 
@@ -89,6 +118,72 @@ function stripBom(content: string): { bom: string; text: string } {
   return content.startsWith("\uFEFF")
     ? { bom: "\uFEFF", text: content.slice(1) }
     : { bom: "", text: content };
+}
+
+// ── Path utils (absorbed from built-in's path-utils + render-utils) ─
+
+const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
+/**
+ * Resolve a path relative to cwd, handling ~ expansion, Unicode space
+ * normalization, @ prefix stripping, and file:// URLs.
+ *
+ * Replaces the built-in's resolveToCwd (which is not exported).
+ */
+function resolveToCwd(filePath: string, cwd: string): string {
+  let normalized = filePath.replace(UNICODE_SPACES, " ");
+  if (normalized.startsWith("@")) {
+    normalized = normalized.slice(1);
+  }
+  const home = homedir();
+  if (normalized === "~") {
+    return home;
+  }
+  if (
+    normalized.startsWith("~/") ||
+    (process.platform === "win32" && normalized.startsWith("~\\"))
+  ) {
+    normalized = home + normalized.slice(1);
+  }
+  if (/^file:\/\//.test(normalized)) {
+    return fileURLToPath(normalized);
+  }
+  return isAbsolute(normalized) ? normalized : resolve(cwd, normalized);
+}
+
+/**
+ * Shorten an absolute path by replacing the home directory prefix with ~.
+ */
+function shortenPath(path: string): string {
+  const home = homedir();
+  if (path.startsWith(home)) {
+    return `~${path.slice(home.length)}`;
+  }
+  return path;
+}
+
+/** Convert unknown to string ("" for null/undefined, null for other types). */
+function str(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (value == null) return "";
+  return null;
+}
+
+function invalidArgText(theme: Theme): string {
+  return theme.fg("error", "[invalid arg]");
+}
+
+/**
+ * Render a file path for the tool header: shortened with ~, themed, and
+ * clickable hyperlink (if terminal supports OSC 8).
+ */
+function renderToolPath(rawPath: string | null, theme: Theme, cwd: string): string {
+  if (rawPath === null) return invalidArgText(theme);
+  if (!rawPath) return theme.fg("toolOutput", "...");
+  const styled = theme.fg("accent", shortenPath(rawPath));
+  if (!getCapabilities().hyperlinks) return styled;
+  const absolutePath = resolveToCwd(rawPath, cwd);
+  return hyperlink(styled, pathToFileURL(absolutePath).href);
 }
 
 // ── Enhanced fuzzy matching ───────────────────────────────────
@@ -583,7 +678,7 @@ async function computeEnhancedEditDiff(
   edits: Array<{ oldText: string; newText: string }>,
   cwd: string,
 ): Promise<EditPreview> {
-  const absolutePath = resolve(cwd, path);
+  const absolutePath = resolveToCwd(path, cwd);
   try {
     try {
       await fsAccess(absolutePath, constants.R_OK);
@@ -624,6 +719,11 @@ interface EditRenderState {
   callComponent?: EditCallComponent;
 }
 
+type EditToolResultLike = {
+  content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+  details?: EditDetails;
+};
+
 function createCallComponent(): EditCallComponent {
   return Object.assign(new Box(1, 1, (text: string) => text), {
     preview: undefined,
@@ -647,26 +747,31 @@ function getCallComponent(state: EditRenderState, lastComponent?: Component): Ed
   return component;
 }
 
-function getRenderableInput(
-  args: unknown,
+function getRenderablePreviewInput(
+  args: RenderableEditArgs | undefined,
 ): { path: string; edits: Array<{ oldText: string; newText: string }> } | null {
-  if (!args || typeof args !== "object") return null;
-  const a = args as Record<string, unknown>;
-  const path = typeof a.path === "string" ? a.path : null;
+  if (!args) return null;
+
+  // Some models use file_path instead of path
+  const path =
+    typeof args.path === "string"
+      ? args.path
+      : typeof args.file_path === "string"
+        ? args.file_path
+        : null;
   if (!path) return null;
+
   if (
-    Array.isArray(a.edits) &&
-    a.edits.length > 0 &&
-    a.edits.every(
-      (e: unknown) =>
-        typeof (e as Record<string, unknown>)?.oldText === "string" &&
-        typeof (e as Record<string, unknown>)?.newText === "string",
+    Array.isArray(args.edits) &&
+    args.edits.length > 0 &&
+    args.edits.every(
+      (edit) => typeof edit?.oldText === "string" && typeof edit?.newText === "string",
     )
   ) {
-    return { path, edits: a.edits as Array<{ oldText: string; newText: string }> };
+    return { path, edits: args.edits };
   }
-  if (typeof a.oldText === "string" && typeof a.newText === "string") {
-    return { path, edits: [{ oldText: a.oldText as string, newText: a.newText as string }] };
+  if (typeof args.oldText === "string" && typeof args.newText === "string") {
+    return { path, edits: [{ oldText: args.oldText, newText: args.newText }] };
   }
   return null;
 }
@@ -684,17 +789,80 @@ function getHeaderBg(
   return (text: string) => theme.bg("toolPendingBg", text);
 }
 
+/**
+ * Set the preview on a call component, returning whether it actually changed.
+ * Handles error↔diff transitions and compares both diff and firstChangedLine.
+ */
+function setEditPreview(
+  component: EditCallComponent,
+  preview: EditPreview,
+  argsKey: string | undefined,
+): boolean {
+  const current = component.preview;
+  const changed =
+    current === undefined ||
+    ("error" in current && "error" in preview
+      ? current.error !== preview.error
+      : "error" in current !== "error" in preview) ||
+    (!("error" in current) &&
+      !("error" in preview) &&
+      (current.diff !== preview.diff || current.firstChangedLine !== preview.firstChangedLine));
+  component.preview = preview;
+  component.previewArgsKey = argsKey;
+  component.previewPending = false;
+  return changed;
+}
+
+function formatEditCall(args: RenderableEditArgs | undefined, theme: Theme, cwd: string): string {
+  const pathDisplay = renderToolPath(str(args?.file_path ?? args?.path), theme, cwd);
+  return `${theme.fg("toolTitle", theme.bold("edit"))} ${pathDisplay}`;
+}
+
+/**
+ * Compute the result body text, or undefined if nothing extra to show.
+ *
+ * - Errors: show error text unless it duplicates the preview error
+ * - Success: show result diff if it differs from the preview diff (e.g. no
+ *   callComponent existed, or the file changed between preview and execution)
+ */
+function formatEditResult(
+  _args: RenderableEditArgs | undefined,
+  preview: EditPreview | undefined,
+  result: EditToolResultLike,
+  theme: Theme,
+  isError: boolean,
+): string | undefined {
+  const previewDiff = preview && !("error" in preview) ? preview.diff : undefined;
+  const previewError = preview && "error" in preview ? preview.error : undefined;
+
+  if (isError) {
+    const errorText = result.content
+      .filter((c) => c.type === "text")
+      .map((c) => c.text || "")
+      .join("\n");
+    if (!errorText || errorText === previewError) {
+      return undefined;
+    }
+    return theme.fg("error", errorText);
+  }
+
+  const resultDiff = result.details?.diff;
+  if (resultDiff && resultDiff !== previewDiff) {
+    return renderDiff(resultDiff);
+  }
+
+  return undefined;
+}
+
 function buildCallComponent(
   component: EditCallComponent,
-  args: unknown,
+  args: RenderableEditArgs | undefined,
   theme: Theme,
+  cwd: string,
 ): EditCallComponent {
   component.setBgFn(getHeaderBg(component.preview, component.settledError ?? false, theme));
   component.clear();
-
-  const rawPath = String((args as Record<string, unknown>)?.path ?? "???");
-  const header = `${theme.fg("toolTitle", theme.bold("edit"))} ${theme.fg("accent", rawPath)}`;
-  component.addChild(new Text(header, 0, 0));
+  component.addChild(new Text(formatEditCall(args, theme, cwd), 0, 0));
 
   if (!component.preview) {
     return component;
@@ -727,6 +895,7 @@ export default function enhancedEditExtension(pi: ExtensionAPI) {
       "  * Preserves unrelated file content when fuzzy matching (built-in can corrupt)",
     ].join("\n"),
     parameters: editSchema,
+    renderShell: "self",
     promptSnippet:
       "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
     promptGuidelines: [
@@ -739,6 +908,12 @@ export default function enhancedEditExtension(pi: ExtensionAPI) {
     prepareArguments(input: unknown): EditInput {
       if (!input || typeof input !== "object") return input as EditInput;
       const args = input as Record<string, unknown>;
+
+      // Some models send file_path instead of path — remap it
+      if (typeof args.file_path === "string" && typeof args.path !== "string") {
+        args.path = args.file_path;
+        delete args.file_path;
+      }
 
       // Some models send edits as JSON string
       if (typeof args.edits === "string") {
@@ -769,7 +944,7 @@ export default function enhancedEditExtension(pi: ExtensionAPI) {
       ctx: ExtensionContext,
     ) {
       const { path, edits } = params;
-      const absolutePath = resolve(ctx.cwd, path);
+      const absolutePath = resolveToCwd(path, ctx.cwd);
 
       return withFileMutationQueue(absolutePath, async () => {
         // Check signal after each await (same pattern as built-in).
@@ -791,11 +966,9 @@ export default function enhancedEditExtension(pi: ExtensionAPI) {
           await fsAccess(absolutePath, constants.R_OK | constants.W_OK);
         } catch (error: unknown) {
           throwIfAborted();
-          const code =
-            error instanceof Error && "code" in error
-              ? (error as NodeJS.ErrnoException).code
-              : "UNKNOWN";
-          throw new Error(`Could not edit file: ${path}. Error code: ${code}.`);
+          const errorMessage =
+            error instanceof Error && "code" in error ? `Error code: ${error.code}` : String(error);
+          throw new Error(`Could not edit file: ${path}. ${errorMessage}.`);
         }
 
         throwIfAborted();
@@ -849,7 +1022,7 @@ export default function enhancedEditExtension(pi: ExtensionAPI) {
     // built-in matching engine that lacks tab normalization).
 
     renderCall(
-      args: EditInput,
+      args: RenderableEditArgs,
       theme: Theme,
       context: {
         state: EditRenderState;
@@ -860,7 +1033,7 @@ export default function enhancedEditExtension(pi: ExtensionAPI) {
       },
     ): Component {
       const component = getCallComponent(context.state, context.lastComponent);
-      const previewInput = getRenderableInput(args);
+      const previewInput = getRenderablePreviewInput(args);
       const argsKey = previewInput
         ? JSON.stringify({ path: previewInput.path, edits: previewInput.edits })
         : undefined;
@@ -880,16 +1053,14 @@ export default function enhancedEditExtension(pi: ExtensionAPI) {
         void computeEnhancedEditDiff(previewInput.path, previewInput.edits, context.cwd).then(
           (preview) => {
             if (component.previewArgsKey === requestKey) {
-              component.preview = preview;
-              component.previewArgsKey = requestKey;
-              component.previewPending = false;
+              setEditPreview(component, preview, requestKey);
               context.invalidate();
             }
           },
         );
       }
 
-      return buildCallComponent(component, args, theme);
+      return buildCallComponent(component, args, theme, context.cwd);
     },
 
     renderResult(
@@ -899,36 +1070,30 @@ export default function enhancedEditExtension(pi: ExtensionAPI) {
       context: {
         state: EditRenderState;
         lastComponent?: Component;
-        args?: EditInput;
+        args?: RenderableEditArgs;
         isError: boolean;
+        cwd: string;
       },
     ): Component {
       const callComponent = context.state.callComponent;
-      const previewInput = getRenderableInput(context.args);
+      const previewInput = getRenderablePreviewInput(context.args);
       const argsKey = previewInput
         ? JSON.stringify({ path: previewInput.path, edits: previewInput.edits })
         : undefined;
 
-      const resultDiff = !context.isError ? result.details?.diff : undefined;
+      const typedResult = result as EditToolResultLike;
+      const resultDiff = !context.isError ? typedResult.details?.diff : undefined;
       let changed = false;
 
       if (callComponent) {
         // Update preview with actual result diff
         if (typeof resultDiff === "string") {
-          const newPreview: EditPreview = {
-            diff: resultDiff,
-            firstChangedLine: result.details?.firstChangedLine ?? 1,
-          };
-          // Only update if different from current preview
-          if (
-            !callComponent.preview ||
-            "error" in callComponent.preview ||
-            callComponent.preview.diff !== resultDiff
-          ) {
-            callComponent.preview = newPreview;
-            callComponent.previewArgsKey = argsKey;
-            changed = true;
-          }
+          changed =
+            setEditPreview(
+              callComponent,
+              { diff: resultDiff, firstChangedLine: typedResult.details?.firstChangedLine },
+              argsKey,
+            ) || changed;
         }
 
         // Update error state
@@ -938,29 +1103,26 @@ export default function enhancedEditExtension(pi: ExtensionAPI) {
         }
 
         if (changed) {
-          buildCallComponent(callComponent, context.args, theme);
+          buildCallComponent(callComponent, context.args, theme, context.cwd);
         }
       }
 
-      // Render result body
-      const component = (context.lastComponent as Container) ?? new Container();
-      component.clear();
+      // Render result body — may be undefined if nothing extra to show
+      const output = formatEditResult(
+        context.args,
+        callComponent?.preview,
+        typedResult,
+        theme,
+        context.isError,
+      );
 
-      if (context.isError) {
-        const errorText = result.content
-          .filter((c) => c.type === "text")
-          .map((c) => c.text || "")
-          .join("\n");
-        if (errorText) {
-          component.addChild(new Spacer(1));
-          component.addChild(new Text(theme.fg("error", errorText), 0, 0));
-        }
+      const component = (context.lastComponent as Container | undefined) ?? new Container();
+      component.clear();
+      if (!output) {
         return component;
       }
-
-      // For successful results, the diff is already shown in the call component
-      // (via the preview mechanism). Only add extra output if there's something
-      // not already displayed.
+      component.addChild(new Spacer(1));
+      component.addChild(new Text(output, 1, 0));
       return component;
     },
   });

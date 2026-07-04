@@ -4,13 +4,15 @@ Fetches a specific URL and extracts readable content. Companion to [web_search](
 
 ## Features
 
+- **Proxy fallback**: automatically retries through a [proxy-fetch](https://github.com/henryhwang/pi-extensions) Cloudflare worker when the direct fetch is blocked (403/451/network error/timeout). Configurable via `WEB_FETCH_PROXY_URL` env var (default: `https://proxy-fetch.436799.xyz`; set to empty string to disable)
+- **Relative link resolution**: resolves relative URLs (`/docs/api`, `../page`, `//cdn.example.com/...`) in the DOM against the page's final URL before markdown conversion, so links are usable in the output
 - **HTML → markdown**: preserves headings, links, and code blocks via Turndown (ideal for LLM consumption)
 - **HTML → plain text**: recursive DOM extraction strips all formatting for minimal output
 - **JSON passthrough**: returns raw JSON as-is (API responses, etc.)
 - **Reader mode**: optional `@mozilla/readability` integration extracts the main article, removing boilerplate (nav, ads, sidebars)
 - **Output truncation**: capped at 50KB / 2000 lines (pi defaults); full content saved to temp file when truncated
 - **Noise removal**: strips `<script>`, `<style>`, `<nav>`, `<footer>`, `<header>`, `<aside>`, `<noscript>`, and HTML comments before conversion
-- **SSRF protection**: blocks localhost, loopback, private/link-local IPs, decimal/hex IP bypasses, and non-HTTP protocols; validates the final URL after redirects
+- **SSRF protection**: blocks localhost, loopback, private/link-local IPs, decimal/hex IP bypasses, and non-HTTP protocols; validates the final URL after redirects/proxy
 - **Binary blocking**: rejects images, audio, video, PDFs, archives, fonts, and other binary content types
 - **URL sanitization**: strips wrapping quotes, `@`-prefixes, and trailing junk characters
 - **Error redaction**: truncates error messages and redacts long opaque tokens
@@ -81,6 +83,51 @@ The fallback handles common Readability failure modes:
 - **Chinese portals**: heavily nested DOM with nav bars, lazy-loaded images, and non-standard layouts
 - **Doc sites**: Docusaurus, ReadTheDocs — sidebar + TOC structure confuses article detection
 - **Readability mutation**: Readability modifies the document in-place during `parse()`. The extension runs it on a cloned document so the fallback source is never corrupted.
+
+## Proxy fallback
+
+When the direct fetch is blocked — by a firewall (403), geo-block (451), network
+error, or timeout — web_fetch can retry through a [proxy-fetch](https://github.com/henryhwang/cf-workers)
+Cloudflare worker. The worker fetches the URL through Cloudflare's edge network,
+bypassing local network restrictions.
+
+**Proxy fallback is disabled by default.** Enable it by:
+- Setting the `WEB_FETCH_PROXY_URL` env var before starting pi, or
+- Running `/proxy-fetch <url>` during a session
+
+| Command | Effect |
+|---------|--------|
+| `/proxy-fetch` | Show current proxy URL |
+| `/proxy-fetch https://my-proxy.example.com` | Set a custom proxy URL (enable) |
+| `/proxy-fetch off` (or `disable`) | Disable proxy fallback |
+| `/proxy-fetch default` (or `reset`) | Reset to the env var value |
+
+The current proxy state is shown in the footer status line throughout the session.
+
+Only blocking errors trigger a proxy retry:
+- **Retried:** HTTP 403, HTTP 451, network errors (connection refused, DNS failure), timeouts
+- **Not retried:** HTTP 404/401/5xx, binary content, response too large, SSRF blocks
+
+If both direct and proxy fetches fail, the error message includes both failure
+reasons for debugging. The result display shows `via proxy` when the proxy was used.
+
+The proxy-fetch worker is independent of this extension — it's a standalone
+Cloudflare worker that simply proxies HTTP requests and returns the final URL
+(after redirects) in the `X-Final-URL` response header.
+
+## Relative link resolution
+
+When fetching an HTML page and converting to markdown, relative links like
+`<a href="/docs/api">` would become broken markdown links
+(`[API Reference](/docs/api)`). This extension resolves relative URLs in the
+DOM against the page's final URL before conversion:
+
+- Handles `href`, `src`, and `action` attributes on all matching elements
+- Resolves against the final URL after redirects (via `X-Final-URL` header for
+  proxied fetches, `res.url` for direct fetches)
+- Skips already-absolute URLs, `data:`, `mailto:`, `tel:`, `#` fragments, and
+  `javascript:` pseudo-protocols
+- Protocol-relative URLs (`//cdn.example.com/...`) are also resolved
 
 ## Truncation
 

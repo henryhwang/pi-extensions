@@ -7,13 +7,14 @@ A collection of extensions for the [Pi Coding Agent](https://github.com/earendil
 | Extension | Description |
 |-----------|-------------|
 | [**model-rotate**](extensions/model-rotate/) | Rotates through a pool of LLM models and guards against HTTP 429 rate-limit errors |
+| [**modelscope-rate-limit**](extensions/modelscope-rate-limit/) | Real-time ModelScope quota monitoring in the status bar with low-quota warnings (≤5 remaining) |
 | [**model-usage**](extensions/model-usage/) | `/model-usage` command — tracks ModelScope API rate-limit quotas (user limit/remaining + model limit/remaining) from response headers |
 | [**proxy-429**](extensions/proxy-429/) | HTTP → HTTPS reverse proxy that rewrites ModelScope 429 error messages so pi's retry logic makes correct decisions. Auto-starts with pi; shows footer indicator and `/proxy-status` command |
 | [**requests**](extensions/requests/) | `/requests` command — shows per-model LLM API request count for monitoring rate-limit usage |
 | [**subagent**](extensions/subagent/) | Delegates tasks to specialized agents (scout, planner, reviewer, worker) running in isolated pi processes |
 | [**web-search**](extensions/web-search/) | Multi-provider web search (Tavily → Exa → Serper) with automatic fallback. Keys persist across sessions in pi's `auth.json` — set once via `/web-search-config`, survive restarts. |
-| [**web-fetch**](extensions/web-fetch/) | Fetches a specific URL and extracts readable content (HTML → markdown) |
-| [**edit**](extensions/edit/) | Enhanced `edit` tool — overrides pi's built-in to fix file corruption on fuzzy match, add tab/space fuzzy matching, and improve error messages with nearby context |
+| [**web-fetch**](extensions/web-fetch/) | Fetches URLs and extracts readable content (HTML → markdown). Proxy fallback for blocked sites, relative link resolution, and `/proxy-fetch` command for dynamic proxy configuration |
+| [**edit**](extensions/edit/) | Enhanced `edit` tool — overrides pi's built-in to fix NFKC file corruption, add tab/space fuzzy matching, improve error messages, and absorb built-in v0.80.3+ features (renderShell, renderToolPath, file_path support, etc.) |
 
 ## Installation
 
@@ -21,7 +22,7 @@ A collection of extensions for the [Pi Coding Agent](https://github.com/earendil
 pi install git:github.com/henryhwang/pi-extensions
 ```
 
-This installs all 8 extensions. Dependencies (`turndown`, `linkedom`, `@mozilla/readability` for web-fetch; `diff` for edit) are installed automatically.
+This installs all 9 extensions. Dependencies (`turndown`, `linkedom`, `@mozilla/readability` for web-fetch; `diff` for edit) are installed automatically.
 
 To load only specific extensions, add a filtered entry to `settings.json`:
 
