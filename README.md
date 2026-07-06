@@ -7,6 +7,7 @@ A collection of extensions for the [Pi Coding Agent](https://github.com/earendil
 | Extension | Description |
 |-----------|-------------|
 | [**model-rotate**](extensions/model-rotate/) | Rotates through a pool of LLM models and guards against HTTP 429 rate-limit errors |
+| [**modelscope-429**](extensions/modelscope-429/) | In-process rewriter for ModelScope's mislabeled 429 errors so pi's retry logic makes correct decisions. Replaces proxy-429 |
 | [**modelscope-rate-limit**](extensions/modelscope-rate-limit/) | Real-time ModelScope quota monitoring in the status bar with low-quota warnings (≤5 remaining) |
 | [**model-usage**](extensions/model-usage/) | `/model-usage` command — tracks ModelScope API rate-limit quotas (user limit/remaining + model limit/remaining) from response headers |
 | [**proxy-429**](extensions/proxy-429/) | HTTP → HTTPS reverse proxy that rewrites ModelScope 429 error messages so pi's retry logic makes correct decisions. Auto-starts with pi; shows footer indicator and `/proxy-status` command |
@@ -22,7 +23,7 @@ A collection of extensions for the [Pi Coding Agent](https://github.com/earendil
 pi install git:github.com/henryhwang/pi-extensions
 ```
 
-This installs all 9 extensions. Dependencies (`turndown`, `linkedom`, `@mozilla/readability` for web-fetch; `diff` for edit) are installed automatically.
+This installs all 10 extensions. Dependencies (`turndown`, `linkedom`, `@mozilla/readability` for web-fetch; `diff` for edit) are installed automatically.
 
 To load only specific extensions, add a filtered entry to `settings.json`:
 
