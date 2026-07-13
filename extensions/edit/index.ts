@@ -12,7 +12,7 @@
  *   5. Custom renderCall/renderResult using enhanced matching for preview
  *      (avoids preview/execution divergence from inherited built-in renderer)
  *
- * Features absorbed from built-in v0.80.3+:
+ * Features absorbed from built-in v0.80.6+:
  *   - renderShell: "self" for proper background/padding control
  *   - file_path field support (rendering + prepareArguments remapping)
  *   - resolveToCwd (~ expansion, Unicode space normalization, @ prefix)
@@ -63,7 +63,7 @@ const replaceEditSchema = Type.Object(
     }),
     newText: Type.String({ description: "Replacement text for this targeted edit." }),
   },
-  { additionalProperties: false },
+  { additionalProperties: true },
 );
 
 const editSchema = Type.Object(
@@ -74,7 +74,7 @@ const editSchema = Type.Object(
         "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
     }),
   },
-  { additionalProperties: false },
+  { additionalProperties: true },
 );
 
 type EditInput = Static<typeof editSchema>;

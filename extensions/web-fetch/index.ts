@@ -738,7 +738,7 @@ export default function (pi: ExtensionAPI) {
       if (arg === "off" || arg === "disable") {
         proxyUrl = "";
         ctx.ui.notify("Proxy-fetch disabled", "info");
-        ctx.ui.setStatus("proxy-fetch", null);
+        ctx.ui.setStatus("proxy-fetch", undefined);
         return;
       }
 
@@ -753,7 +753,7 @@ export default function (pi: ExtensionAPI) {
               "error",
             );
             proxyUrl = "";
-            ctx.ui.setStatus("proxy-fetch", null);
+            ctx.ui.setStatus("proxy-fetch", undefined);
             return;
           }
           proxyUrl = envUrl;
@@ -762,7 +762,7 @@ export default function (pi: ExtensionAPI) {
         } else {
           proxyUrl = "";
           ctx.ui.notify("Proxy-fetch reset: no URL configured (disabled)", "info");
-          ctx.ui.setStatus("proxy-fetch", null);
+          ctx.ui.setStatus("proxy-fetch", undefined);
         }
         return;
       }

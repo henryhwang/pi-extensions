@@ -24,7 +24,7 @@ This extension fixes the corruption by:
 2. Mapping fuzzy match positions back to original content offsets
 3. Applying edits to the **original** content — unrelated bytes are untouched
 
-## Features absorbed from built-in v0.80.3+
+## Features absorbed from built-in (verified against v0.80.6)
 
 The built-in has evolved; these features were absorbed to stay compatible:
 
@@ -38,9 +38,8 @@ The built-in has evolved; these features were absorbed to stay compatible:
 | **Result diff fallback** | Shows result diff in the result body when no `callComponent` exists (e.g. session restore edge cases) |
 | **`setEditPreview`** | Proper change detection helper comparing error↔diff transitions, `diff`, and `firstChangedLine` |
 
-## What's preserved (identical to built-in)
+## What's preserved (aligned with built-in v0.80.6)
 
-- `additionalProperties: false` on both schemas
 - `edits` as JSON string handling (Opus 4.6, GLM-5.1)
 - Legacy flat `{path, oldText, newText}` format (non-`edits[]` models)
 - Line ending normalization (`\r\n` → `\n`)
@@ -53,6 +52,10 @@ The built-in has evolved; these features were absorbed to stay compatible:
 - Uniqueness check for each `oldText`
 - Abort signal handling (`throwIfAborted()` after each await)
 - `promptSnippet` and `promptGuidelines` (LLM instructions)
+
+> Note: the built-in relaxed `additionalProperties` from `false` to `true` in v0.80.5
+> (CHANGELOG #6278, so model-invented fields like `explanation` are accepted). This
+> extension matches that, so otherwise-valid edits are not rejected.
 
 ## What's different from built-in
 
