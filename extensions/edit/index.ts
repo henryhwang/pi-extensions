@@ -196,7 +196,7 @@ function renderToolPath(rawPath: string | null, theme: Theme, cwd: string): stri
  * position mapping back to original content). The explicit smart-quote, dash,
  * and space replacements are all 1:1 character transforms.
  */
-function normalizeForFuzzyMatch(text: string): string {
+export function normalizeForFuzzyMatch(text: string): string {
   return (
     text
       // tabs to 2 spaces (common indent mismatch — not in built-in)
@@ -211,6 +211,13 @@ function normalizeForFuzzyMatch(text: string): string {
       .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
       // Various dashes/hyphens to -
       .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
+      // Arrows to ASCII equivalents
+      // U+2192 rightwards arrow, U+2190 leftwards arrow (common in docs,
+      // error hierarchies, type signatures - LLMs often type -> / <- instead)
+      .replace(/\u2192/g, "->")
+      .replace(/\u2190/g, "<-")
+      // Ellipsis to three dots (U+2026 - LLMs often type ... while files have …)
+      .replace(/\u2026/g, "...")
       // Special spaces to regular space
       .replace(/[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g, " ")
   );
@@ -261,11 +268,10 @@ function countOccurrences(fuzzyContent: string, fuzzyOldText: string): number {
 /**
  * Map a position in fuzzy-normalized content back to the original (LF-only) content.
  *
- * Handles: tab→2-spaces expansion, trailing whitespace removal, 1:1 unicode transforms.
- * All transforms in normalizeForFuzzyMatch are 1:1 character mappings except tab expansion
- * (1→2) and trailing whitespace removal (N→0), both of which are handled explicitly.
+ * Handles: tab-to-2-spaces expansion, arrow/ellipsis 1:N expansions, trailing whitespace
+ * removal, and 1:1 unicode transforms (smart quotes, dashes, special spaces).
  */
-function mapFuzzyPosToOriginal(original: string, fuzzy: string, fuzzyPos: number): number {
+export function mapFuzzyPosToOriginal(original: string, fuzzy: string, fuzzyPos: number): number {
   let oi = 0;
   let fi = 0;
   while (fi < fuzzyPos && oi < original.length) {
@@ -276,6 +282,24 @@ function mapFuzzyPosToOriginal(original: string, fuzzy: string, fuzzyPos: number
       // Tab expanded to 2 spaces in fuzzy
       oi++;
       fi += 2;
+    } else if (oc === "\u2192" && fc === "-" && fi + 1 < fuzzy.length && fuzzy[fi + 1] === ">") {
+      // Rightwards arrow (U+2192) expanded to -> in fuzzy
+      oi++;
+      fi += 2;
+    } else if (oc === "\u2190" && fc === "<" && fi + 1 < fuzzy.length && fuzzy[fi + 1] === "-") {
+      // Leftwards arrow (U+2190) expanded to <- in fuzzy
+      oi++;
+      fi += 2;
+    } else if (
+      oc === "\u2026" &&
+      fc === "." &&
+      fi + 2 < fuzzy.length &&
+      fuzzy[fi + 1] === "." &&
+      fuzzy[fi + 2] === "."
+    ) {
+      // Ellipsis (U+2026) expanded to ... in fuzzy
+      oi++;
+      fi += 3;
     } else if (fc === "\n" && oc !== "\n") {
       // Trailing whitespace removed before newline in fuzzy; skip original whitespace
       oi++;
@@ -542,12 +566,17 @@ function applyEditsWithImprovedErrors(
   }
 
   if (normalizedContent === newContent) {
+    // Detect no-op edits (oldText == newText) to give an actionable message
+    // instead of the misleading "special characters" hint.
+    const sameEdits = normalizedEdits.filter((e) => e.oldText === e.newText);
+    const hint =
+      sameEdits.length > 0
+        ? ` (oldText and newText are identical in ${sameEdits.length} edit(s) - nothing to change)`
+        : "";
     const message =
       normalizedEdits.length === 1
-        ? "No changes made to " +
-          path +
-          ". The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected."
-        : `No changes made to ${path}. The replacements produced identical content.`;
+        ? `No changes made to ${path}. The replacement produced identical content.${hint}`
+        : `No changes made to ${path}. The replacements produced identical content.${hint}`;
     throw new Error(message);
   }
 
